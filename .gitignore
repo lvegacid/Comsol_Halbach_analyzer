@@ -1,0 +1,7 @@
+.kiro/
+.vscode/
+
+__pycache__/
+*.pyc
+
+*.asv
