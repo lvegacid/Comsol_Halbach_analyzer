@@ -1,4 +1,4 @@
-function summary = extraction_controller(model, datasets, outputDir, modelName, logFn, progressFn, fovInfo)
+function summary = extraction_controller(model, datasets, outputDir, modelName, logFn, progressFn, fovInfo, options)
 % extraction_controller  Orquesta la extracción para cada dataset seleccionado.
 %
 % Para cada dataset: crea carpeta, construye rutas, llama a export_dataset
@@ -17,6 +17,12 @@ function summary = extraction_controller(model, datasets, outputDir, modelName, 
 % Salidas:
 %   summary.nOK, summary.nError, summary.outputDir
 
+    if nargin < 8 || isempty(options)
+        options = default_extraction_options();
+    else
+        options = normalize_extraction_options(options);
+    end
+
     nTotal = numel(datasets);
     nOK    = 0;
     nError = 0;
@@ -24,33 +30,53 @@ function summary = extraction_controller(model, datasets, outputDir, modelName, 
     for i = 1:nTotal
         ds = datasets(i);
         try
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            logFn('INFO', ts, ds.tag, sprintf('Preparando dataset %d de %d: %s', i, nTotal, ds.shortLabel));
+
             % Crear carpeta usando shortLabel
             folderPath = create_output_folder(outputDir, modelName, ds.shortLabel, ds.tag);
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            logFn('INFO', ts, ds.tag, sprintf('Carpeta de salida lista: %s', folderPath));
 
             % Construir rutas de salida
             safeName = make_safe_name(ds.shortLabel);
-            [txtPath, pngPath] = build_output_paths(folderPath, safeName, modelName);
+            [histTxtPath, plot3dPngPath] = build_output_paths(folderPath, safeName, modelName);
 
-            % Exportar PNG (3D plot) y TXT (histograma) en una sola llamada
-            export_dataset(model, ds.tag, txtPath, pngPath);
+            doMainExports = logical(options.enable3DPlot) || logical(options.enableHistogram);
+
+            if doMainExports
+                % Flujo historico estable: export_dataset + postproceso Python
+                export_dataset(model, ds.tag, histTxtPath, plot3dPngPath);
+            end
+
+            if options.enableHistogram
+                analysisName = ds.shortLabel;
+                try
+                    run_bfov_python_postprocess(histTxtPath, modelName, fovInfo, analysisName);
+                    ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                    logFn('INFO', ts, ds.tag, 'Postproceso BFOV Python completado.');
+                catch postErr
+                    ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                    logFn('WARN', ts, ds.tag, ['Postproceso BFOV no ejecutado: ' compact_python_error(postErr.message)]);
+                    ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                    logFn('WARN', ts, ds.tag, ...
+                        'Instala dependencias en el entorno Linux: python3 -m pip install --user numpy matplotlib');
+                end
+            end
+
+            if options.enableCustomCoordinates
+                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                logFn('INFO', ts, ds.tag, sprintf(['Iniciando exportación B_FOV Custom Coordinates ' ...
+                    '(nTheta=%d, nPhi=%d, R=%.6f m)...'], ...
+                    options.coordConfig.nTheta, options.coordConfig.nPhi, options.coordConfig.R));
+                [coordTxtPath, coordPngPath] = export_custom_coordinates(model, ds.tag, folderPath, options.coordConfig);
+                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                logFn('INFO', ts, ds.tag, sprintf('B_FOV Custom Coordinates exportado: %s | %s', coordTxtPath, coordPngPath));
+            end
 
             nOK = nOK + 1;
             ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
             logFn('INFO', ts, ds.tag, sprintf('OK → %s', folderPath));
-
-            % Postproceso BFOV en Python a partir del TXT de histograma.
-            analysisName = ds.shortLabel;
-            try
-                run_bfov_python_postprocess(txtPath, modelName, fovInfo, analysisName);
-                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
-                logFn('INFO', ts, ds.tag, 'Postproceso BFOV Python completado.');
-            catch postErr
-                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
-                logFn('WARN', ts, ds.tag, ['Postproceso BFOV no ejecutado: ' compact_python_error(postErr.message)]);
-                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
-                logFn('WARN', ts, ds.tag, ...
-                    'Instala dependencias en el entorno Linux: python3 -m pip install --user numpy matplotlib');
-            end
 
         catch err
             nError = nError + 1;
@@ -72,6 +98,78 @@ function summary = extraction_controller(model, datasets, outputDir, modelName, 
     summary.nOK      = nOK;
     summary.nError   = nError;
     summary.outputDir = outputDir;
+end
+
+% -------------------------------------------------------------------------
+function options = default_extraction_options()
+    options.enable3DPlot = true;
+    options.enableHistogram = true;
+    options.enableCustomCoordinates = false;
+    options.histBins = 100;
+    options.coordConfig = struct('model', 'Spherical coordinates', ...
+        'nTheta', 100, 'nPhi', 100, 'R', 0.1);
+end
+
+% -------------------------------------------------------------------------
+function options = normalize_extraction_options(options)
+    defaults = default_extraction_options();
+    fields = fieldnames(defaults);
+    for i = 1:numel(fields)
+        f = fields{i};
+        if ~isfield(options, f)
+            options.(f) = defaults.(f);
+        end
+    end
+
+    if ~isstruct(options.coordConfig)
+        options.coordConfig = defaults.coordConfig;
+    end
+
+    cfgFields = fieldnames(defaults.coordConfig);
+    for i = 1:numel(cfgFields)
+        f = cfgFields{i};
+        if ~isfield(options.coordConfig, f)
+            options.coordConfig.(f) = defaults.coordConfig.(f);
+        end
+    end
+end
+
+% -------------------------------------------------------------------------
+function run_optional_exports(model, ds, folderPath, modelName, histTxtPath, plot3dPngPath, options, logFn)
+    [~, plot3dBase, ~] = fileparts(plot3dPngPath);
+    plot3dTxtPath = fullfile(folderPath, [plot3dBase '.txt']);
+
+    [histDir, histBase, ~] = fileparts(histTxtPath);
+    histPngPath = fullfile(histDir, [histBase '.png']);
+
+    if options.enable3DPlot
+        ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+        logFn('INFO', ts, ds.tag, 'Iniciando exportación B_FOV 3D Plot...');
+        export_3d_plot(model, ds.tag, plot3dPngPath, plot3dTxtPath);
+        ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+        logFn('INFO', ts, ds.tag, 'B_FOV 3D Plot exportado (PNG y TXT).');
+    end
+
+    if options.enableHistogram
+        ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+        logFn('INFO', ts, ds.tag, sprintf('Iniciando exportación B_FOV Histogram (bins=%d)...', options.histBins));
+        export_histogram(model, ds.tag, histTxtPath, histPngPath, options.histBins);
+        ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+        logFn('INFO', ts, ds.tag, sprintf('B_FOV Histogram exportado (PNG y TXT, bins=%d).', options.histBins));
+    end
+
+    if options.enableCustomCoordinates
+        ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+        logFn('INFO', ts, ds.tag, sprintf(['Iniciando exportación B_FOV Custom Coordinates ' ...
+            '(nTheta=%d, nPhi=%d, R=%.6f m)...'], ...
+            options.coordConfig.nTheta, options.coordConfig.nPhi, options.coordConfig.R));
+        [coordTxtPath, coordPngPath] = export_custom_coordinates(model, ds.tag, folderPath, options.coordConfig);
+        ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+        logFn('INFO', ts, ds.tag, sprintf('B_FOV Custom Coordinates exportado: %s | %s', coordTxtPath, coordPngPath));
+    end
+
+    ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+    logFn('INFO', ts, ds.tag, sprintf('Dataset completado: %s', ds.shortLabel));
 end
 
 % -------------------------------------------------------------------------

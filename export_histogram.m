@@ -5,18 +5,34 @@
 %   model       (com.comsol.model.Model)
 %   datasetTag  (char) — tag del dataset original, e.g. 'dset1'
 %   outputPath  (char) — ruta completa del archivo TXT de salida
+%   pngPath     (char, opcional) — ruta PNG del histograma
+%   nBins       (double, opcional) — número de bins (default 100)
 %
 % Lanza:
 %   MException con identifier 'ComsolAnalyzer:exportHistogram'
-function export_histogram(model, datasetTag, outputPath)
+function export_histogram(model, datasetTag, outputPath, pngPath, nBins)
+    if nargin < 4
+        pngPath = '';
+    end
+    if nargin < 5 || isempty(nBins)
+        nBins = 100;
+    end
+
+    nBins = floor(double(nBins));
+    if ~isfinite(nBins) || nBins < 1
+        nBins = 100;
+    end
+
     newDsetTag = ['dset_fov_' datasetTag];
     pg1dTag    = ['pg1d_hist_' datasetTag];
     exportTag  = ['plot_hist_' datasetTag];
+    imgTag     = ['img_hist_' datasetTag];
     try
         % 1. Limpiar nodos previos si existen
         try; model.result.dataset.remove(newDsetTag); catch; end
         try; model.result.remove(pg1dTag);            catch; end
         try; model.result.export.remove(exportTag);   catch; end
+        try; model.result.export.remove(imgTag);       catch; end
 
         % 2. Encontrar el tag de la selección cuyo label es 'FOV'
         %    Las selecciones viven en model.component('comp1').selection
@@ -41,7 +57,7 @@ function export_histogram(model, datasetTag, outputPath)
         model.result(pg1dTag).feature('hist1').set('unit',     'mT');
         model.result(pg1dTag).feature('hist1').set('function', 'discrete');
         model.result(pg1dTag).feature('hist1').set('method',   'number');
-        model.result(pg1dTag).feature('hist1').set('number',   100);
+        model.result(pg1dTag).feature('hist1').set('number',   nBins);
         model.result(pg1dTag).run;
 
         % 6. Exportar a TXT
@@ -49,8 +65,20 @@ function export_histogram(model, datasetTag, outputPath)
         model.result.export(exportTag).set('filename', outputPath);
         model.result.export(exportTag).run;
 
+        % 7. Exportar PNG (opcional)
+        if ~isempty(pngPath)
+            model.result.export.create(imgTag, pg1dTag, 'Image');
+            model.result.export(imgTag).set('imagetype',  'png');
+            model.result.export(imgTag).set('pngfilename', pngPath);
+            model.result.export(imgTag).set('width',      '900');
+            model.result.export(imgTag).set('height',     '600');
+            model.result.export(imgTag).set('resolution', '96');
+            model.result.export(imgTag).run;
+        end
+
     catch cause
         try; model.result.export.remove(exportTag);   catch; end
+        try; model.result.export.remove(imgTag);       catch; end
         try; model.result.remove(pg1dTag);            catch; end
         try; model.result.dataset.remove(newDsetTag); catch; end
         throw(MException('ComsolAnalyzer:exportHistogram', ...
@@ -58,8 +86,9 @@ function export_histogram(model, datasetTag, outputPath)
             datasetTag, cause.message));
     end
 
-    % 7. Limpiar nodos temporales
+    % 8. Limpiar nodos temporales
     try; model.result.export.remove(exportTag);   catch; end
+    try; model.result.export.remove(imgTag);       catch; end
     try; model.result.remove(pg1dTag);            catch; end
     try; model.result.dataset.remove(newDsetTag); catch; end
 end
