@@ -37,6 +37,10 @@ function export_3d_plot(model, datasetTag, outputPath, outputTxtPath)
         model.result.export.create(exportTag, pgTag, 'Image');
         model.result.export(exportTag).set('imagetype',  'png');
         model.result.export(exportTag).set('pngfilename', outputPath);
+        model.result.export(exportTag).set('title3d',    'on');
+        model.result.export(exportTag).set('legend3d',   'on');
+        model.result.export(exportTag).set('logo3d',     'on');
+        model.result.export(exportTag).set('options3d',  'off');
         model.result.export(exportTag).set('width',      '800');
         model.result.export(exportTag).set('height',     '600');
         model.result.export(exportTag).set('resolution', '96');
@@ -63,4 +67,3 @@ function export_3d_plot(model, datasetTag, outputPath, outputTxtPath)
     try; model.result.export.remove(txtTag);    catch; end
     try; model.result.remove(pgTag);            catch; end
 end
-
