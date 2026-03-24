@@ -1,0 +1,1 @@
+# Comsol_Halbach_analyzer
