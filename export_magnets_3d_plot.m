@@ -145,6 +145,7 @@ function export_png_via_mphplot(model, pg3dTag, pngOutPath)
         newFigures = setdiff(currentFigures, existingFigures);
         if ~isempty(newFigures); fig = newFigures(1); else; fig = gcf; end
         try; set(fig, 'Visible', 'off'); catch; end
+        ensure_color_scale_visible(fig);
         drawnow;
         try
             exportgraphics(fig, pngOutPath, 'Resolution', 96);
@@ -156,4 +157,29 @@ function export_png_via_mphplot(model, pg3dTag, pngOutPath)
         rethrow(cause);
     end
     try; if ~isempty(fig) && isvalid(fig); close(fig); end; catch; end
+end
+
+% -------------------------------------------------------------------------
+function ensure_color_scale_visible(fig)
+    if isempty(fig) || ~isvalid(fig)
+        return;
+    end
+
+    hasColorBar = ~isempty(findall(fig, 'Type', 'ColorBar'));
+    if hasColorBar
+        return;
+    end
+
+    ax = findall(fig, 'Type', 'Axes');
+    if isempty(ax)
+        return;
+    end
+
+    for i = 1:numel(ax)
+        try
+            colorbar(ax(i));
+            return;
+        catch
+        end
+    end
 end
