@@ -117,6 +117,16 @@ chkBfovCoord = uicheckbox(fig, ...
     'Position', [20 125 250 22], ...
     'Value', false);
 
+chkMagnets3D = uicheckbox(fig, ...
+    'Text', 'Magnets 3D Plot', ...
+    'Position', [20 101 220 22], ...
+    'Value', false);
+
+chkMagnetsHist = uicheckbox(fig, ...
+    'Text', 'Magnets Histogram', ...
+    'Position', [20 77 220 22], ...
+    'Value', false);
+
 % --- Panel: Log ---
 lblLog = uilabel(fig, 'Text', 'Log:', ...
     'Position', [20 88 60 22], 'FontWeight', 'bold');
@@ -164,6 +174,8 @@ btnCopyLog.ButtonPushedFcn = @(~,~) copyLogCallback();
 chkBfov3D.ValueChangedFcn = @(~,~) updateRunButtonState();
 chkBfovHist.ValueChangedFcn = @(~,~) updateRunButtonState();
 chkBfovCoord.ValueChangedFcn = @(~,~) updateRunButtonState();
+chkMagnets3D.ValueChangedFcn = @(~,~) updateRunButtonState();
+chkMagnetsHist.ValueChangedFcn = @(~,~) updateRunButtonState();
 
 % Layout responsivo para log y datasets
 fig.SizeChangedFcn = @(~,~) layoutControls();
@@ -209,7 +221,7 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         desiredDatasetH = min(max(desiredDatasetH, 62), 170);
 
         minLogH = 190;
-        minRunY = bottom + minLogH + 117;
+        minRunY = bottom + minLogH + 165;
         datasetTop = yDatasetLabel - 6;
         maxDatasetHBySpace = max(60, datasetTop - (minRunY + 38));
         datasetH = min(desiredDatasetH, maxDatasetHBySpace);
@@ -219,7 +231,9 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         chk3DY = runY - 32;
         chkHistY = chk3DY - 24;
         chkCoordY = chkHistY - 24;
-        logLabelY = chkCoordY - 34;
+        chkMag3DY = chkCoordY - 24;
+        chkMagHistY = chkMag3DY - 24;
+        logLabelY = chkMagHistY - 34;
         logH = max(minLogH, logLabelY - 3 - bottom);
 
         btnCheckConnection.Position = [left yConn 170 26];
@@ -244,6 +258,8 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         chkBfov3D.Position = [left chk3DY 220 22];
         chkBfovHist.Position = [left chkHistY 220 22];
         chkBfovCoord.Position = [left chkCoordY 250 22];
+        chkMagnets3D.Position = [left chkMag3DY 220 22];
+        chkMagnetsHist.Position = [left chkMagHistY 220 22];
 
         lblLog.Position = [left logLabelY 60 22];
         btnCopyLog.Position = [xBrowse logLabelY browseW 22];
@@ -271,7 +287,8 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         s = fig.UserData;
         hasModel = ~isempty(s.model);
         hasDatasets = ~isempty(s.datasets);
-        hasOutputOption = logical(chkBfov3D.Value) || logical(chkBfovHist.Value) || logical(chkBfovCoord.Value);
+        hasOutputOption = logical(chkBfov3D.Value) || logical(chkBfovHist.Value) || ...
+            logical(chkBfovCoord.Value) || logical(chkMagnets3D.Value) || logical(chkMagnetsHist.Value);
 
         if hasModel && hasDatasets && hasOutputOption
             btnRun.Enable = 'on';
@@ -668,11 +685,15 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         options.enable3DPlot = logical(chkBfov3D.Value);
         options.enableHistogram = logical(chkBfovHist.Value);
         options.enableCustomCoordinates = logical(chkBfovCoord.Value);
+        options.enableMagnets3DPlot = logical(chkMagnets3D.Value);
+        options.enableMagnetsHistogram = logical(chkMagnetsHist.Value);
 
-        if ~options.enable3DPlot && ~options.enableHistogram && ~options.enableCustomCoordinates
+        if ~options.enable3DPlot && ~options.enableHistogram && ~options.enableCustomCoordinates && ...
+           ~options.enableMagnets3DPlot && ~options.enableMagnetsHistogram
             ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
             appendLog('WARN', ts, '', ...
-                'Debe seleccionar al menos una opción de salida (3D Plot, Histogram o Custom Coordinates).');
+                ['Debe seleccionar al menos una opción de salida ' ...
+                 '(B_FOV 3D, B_FOV Histogram, B_FOV Custom Coordinates, Magnets 3D o Magnets Histogram).']);
             return;
         end
 
@@ -701,6 +722,18 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
                 'nTheta', getpref('ComsolAnalyzer', 'Coord_nTheta', 100), ...
                 'nPhi',   getpref('ComsolAnalyzer', 'Coord_nPhi', 100), ...
                 'R',      getpref('ComsolAnalyzer', 'Coord_R', 0.1));
+        end
+
+        if options.enableMagnetsHistogram
+            [okMagnetsBins, magnetsHistBins] = ask_magnets_histogram_bins();
+            if ~okMagnetsBins
+                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                appendLog('INFO', ts, '', 'Extracción cancelada por el usuario (configuración de Magnets histogram bins).');
+                return;
+            end
+            options.magnetsHistBins = magnetsHistBins;
+        else
+            options.magnetsHistBins = getpref('ComsolAnalyzer', 'MagnetsHistogramBins', 100);
         end
 
         % Deshabilitar Run durante la extracción
@@ -1012,6 +1045,26 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
                 delete(dlg);
             end
         end
+    end
+
+    function [ok, bins] = ask_magnets_histogram_bins()
+        ok = false;
+        bins = getpref('ComsolAnalyzer', 'MagnetsHistogramBins', 100);
+
+        answer = inputdlg({'Number of bins:'}, 'Magnets Histogram', 1, {num2str(bins)});
+        if isempty(answer)
+            return;
+        end
+
+        value = str2double(strtrim(answer{1}));
+        if isnan(value) || ~isfinite(value) || value < 1 || floor(value) ~= value
+            uialert(fig, 'El valor de bins debe ser un entero positivo.', 'Valor inválido');
+            return;
+        end
+
+        bins = value;
+        setpref('ComsolAnalyzer', 'MagnetsHistogramBins', bins);
+        ok = true;
     end
 
     function shouldProceed = preview_custom_coordinate_configuration(coordCfg)

@@ -272,14 +272,7 @@ end
 
 % -------------------------------------------------------------------------
 function export_png_with_strategies(model, pg3dTag, imgTag, pngOutPath)
-    % Estrategia A: mphplot + exportgraphics (evita ExportFeatureClient.run).
-    try
-        export_png_via_mphplot(model, pg3dTag, pngOutPath);
-        return;
-    catch errA
-    end
-
-    % Estrategia B: ExportFeatureClient.run con configuracion completa.
+    % Estrategia A: COMSOL Image export nativo con legend3d=on (incluye escala de color).
     try
         try; model.result.export.remove(imgTag); catch; end
         model.result.export.create(imgTag, pg3dTag, 'Image');
@@ -321,17 +314,43 @@ function export_png_with_strategies(model, pg3dTag, imgTag, pngOutPath)
         model.result.export(imgTag).set('highprecisioncolor', 'off');
         model.result.export(imgTag).set('pngfilename', pngOutPath);
         model.result.export(imgTag).run;
+        try; model.result.export.remove(imgTag); catch; end
+        return;
+    catch errA
+        try; model.result.export.remove(imgTag); catch; end
+    end
+
+    % Estrategia B (fallback): mphplot + exportgraphics.
+    try
+        export_png_via_mphplot(model, pg3dTag, pngOutPath);
         return;
     catch errB
-        error('PNG mphplot fallo: %s | PNG export.run fallo: %s', errA.message, errB.message);
+        error('PNG COMSOL export.run fallo: %s | PNG mphplot fallo: %s', errA.message, errB.message);
     end
 end
 
 % -------------------------------------------------------------------------
 function export_png_via_mphplot(model, pg3dTag, pngOutPath)
-    fig = figure('Visible', 'off');
+    existingFigures = findall(0, 'Type', 'figure');
+    fig = [];
     try
         mphplot(model, pg3dTag);
+        drawnow;
+
+        currentFigures = findall(0, 'Type', 'figure');
+        newFigures = setdiff(currentFigures, existingFigures);
+        if ~isempty(newFigures)
+            fig = newFigures(1);
+        else
+            fig = gcf;
+        end
+
+        try
+            set(fig, 'Visible', 'off');
+        catch
+        end
+
+        ensure_color_scale_visible(fig);
         drawnow;
         try
             exportgraphics(fig, pngOutPath, 'Resolution', 96);
@@ -339,10 +358,45 @@ function export_png_via_mphplot(model, pg3dTag, pngOutPath)
             saveas(fig, pngOutPath);
         end
     catch cause
-        close(fig);
+        try
+            if ~isempty(fig) && isvalid(fig)
+                close(fig);
+            end
+        catch
+        end
         rethrow(cause);
     end
-    close(fig);
+    try
+        if ~isempty(fig) && isvalid(fig)
+            close(fig);
+        end
+    catch
+    end
+end
+
+% -------------------------------------------------------------------------
+function ensure_color_scale_visible(fig)
+    if isempty(fig) || ~isvalid(fig)
+        return;
+    end
+
+    hasColorBar = ~isempty(findall(fig, 'Type', 'ColorBar'));
+    if hasColorBar
+        return;
+    end
+
+    ax = findall(fig, 'Type', 'Axes');
+    if isempty(ax)
+        return;
+    end
+
+    for i = 1:numel(ax)
+        try
+            colorbar(ax(i));
+            return;
+        catch
+        end
+    end
 end
 
 % -------------------------------------------------------------------------

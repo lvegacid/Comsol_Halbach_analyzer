@@ -74,6 +74,10 @@ function summary = extraction_controller(model, datasets, outputDir, modelName, 
                 logFn('INFO', ts, ds.tag, sprintf('B_FOV Custom Coordinates exportado: %s | %s', coordTxtPath, coordPngPath));
             end
 
+            if options.enableMagnets3DPlot || options.enableMagnetsHistogram
+                run_magnets_exports(model, ds, folderPath, modelName, options, logFn);
+            end
+
             nOK = nOK + 1;
             ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
             logFn('INFO', ts, ds.tag, sprintf('OK → %s', folderPath));
@@ -105,7 +109,10 @@ function options = default_extraction_options()
     options.enable3DPlot = true;
     options.enableHistogram = true;
     options.enableCustomCoordinates = false;
+    options.enableMagnets3DPlot = false;
+    options.enableMagnetsHistogram = false;
     options.histBins = 100;
+    options.magnetsHistBins = 100;
     options.coordConfig = struct('model', 'Spherical coordinates', ...
         'nTheta', 100, 'nPhi', 100, 'R', 0.1);
 end
@@ -130,6 +137,51 @@ function options = normalize_extraction_options(options)
         f = cfgFields{i};
         if ~isfield(options.coordConfig, f)
             options.coordConfig.(f) = defaults.coordConfig.(f);
+        end
+    end
+end
+
+% -------------------------------------------------------------------------
+function run_magnets_exports(model, ds, folderPath, modelName, options, logFn)
+    safeName = make_safe_name(ds.shortLabel);
+    if isempty(safeName)
+        safeName = make_safe_name(ds.tag);
+    end
+
+    magnets3dPngPath = fullfile(folderPath, sprintf('Magnets_%s_%s.png', safeName, modelName));
+    magnets3dTxtPath = fullfile(folderPath, sprintf('Magnets_%s_%s.txt', safeName, modelName));
+    magnetsHistTxtPath = fullfile(folderPath, sprintf('Magnets_histogram_%s_%s.txt', safeName, modelName));
+    magnetsHistPngPath = fullfile(folderPath, sprintf('Magnets_histogram_%s_%s.png', safeName, modelName));
+
+    if options.enableMagnets3DPlot
+        ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+        logFn('INFO', ts, ds.tag, 'Iniciando exportación Magnets 3D Plot...');
+        try
+            export_magnets_3d_plot(model, ds.tag, magnets3dPngPath, magnets3dTxtPath);
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            logFn('INFO', ts, ds.tag, 'Magnets 3D Plot exportado (PNG y TXT).');
+        catch err
+            if is_not_connected_error(err)
+                rethrow(err);
+            end
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            logFn('WARN', ts, ds.tag, ['Magnets 3D Plot no se pudo exportar: ' err.message]);
+        end
+    end
+
+    if options.enableMagnetsHistogram
+        ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+        logFn('INFO', ts, ds.tag, sprintf('Iniciando exportación Magnets Histogram (bins=%d)...', options.magnetsHistBins));
+        try
+            export_magnets_histogram(model, ds.tag, magnetsHistTxtPath, magnetsHistPngPath, options.magnetsHistBins);
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            logFn('INFO', ts, ds.tag, sprintf('Magnets Histogram exportado (PNG y TXT, bins=%d).', options.magnetsHistBins));
+        catch err
+            if is_not_connected_error(err)
+                rethrow(err);
+            end
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            logFn('WARN', ts, ds.tag, ['Magnets Histogram no se pudo exportar: ' err.message]);
         end
     end
 end
