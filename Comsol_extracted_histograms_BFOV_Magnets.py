@@ -1,10 +1,17 @@
-import numpy as np
-import matplotlib.pyplot as plt
-from datetime import datetime
-import matplotlib as mpl
 import argparse
 import os
 import sys
+from datetime import datetime
+
+import matplotlib as mpl
+import numpy as np
+
+# En entornos sin display (ejecucion desde MATLAB/Linux), seleccionar backend
+# no interactivo antes de importar pyplot evita errores EGL/GLX.
+if "--no-show" in sys.argv:
+    mpl.use("Agg")
+
+import matplotlib.pyplot as plt
 mpl.rcParams.update(mpl.rcParamsDefault)
 plt.style.use("default")
 plt.rcParams['figure.dpi'] = 100
@@ -465,6 +472,7 @@ plt.ylim(-0.1,1.09)
 
 
 plt.tight_layout()
-plt.show()
+if not args.no_show:
+    plt.show()
 
 

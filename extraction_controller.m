@@ -333,7 +333,7 @@ function run_magnets_python_postprocess(magnetsTxtPath, magnetInfo, analysisName
     end
 
     scriptPath = fullfile(fileparts(mfilename('fullpath')), ...
-        'Comsol_extracted_histograms_BFOV_Magnets.py');
+        'Comsol_extracted_magnets_histogram.py');
 
     if ~isfile(scriptPath)
         error('No se encontro script Python de postproceso: %s', scriptPath);
