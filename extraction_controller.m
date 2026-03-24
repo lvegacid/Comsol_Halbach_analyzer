@@ -113,6 +113,8 @@ function options = default_extraction_options()
     options.enableMagnetsHistogram = false;
     options.histBins = 100;
     options.magnetsHistBins = 100;
+    options.magnetsStepPercent = 2;
+    options.magnetsBr = 1.4;
     options.coordConfig = struct('model', 'Spherical coordinates', ...
         'nTheta', 100, 'nPhi', 100, 'R', 0.1);
 end
@@ -176,6 +178,19 @@ function run_magnets_exports(model, ds, folderPath, modelName, options, logFn)
             export_magnets_histogram(model, ds.tag, magnetsHistTxtPath, magnetsHistPngPath, options.magnetsHistBins);
             ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
             logFn('INFO', ts, ds.tag, sprintf('Magnets Histogram exportado (PNG y TXT, bins=%d).', options.magnetsHistBins));
+
+            try
+                run_magnets_python_postprocess(magnetsHistTxtPath, modelName, ds.shortLabel, options.magnetsBr, options.magnetsStepPercent);
+                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                logFn('INFO', ts, ds.tag, sprintf('Postproceso Magnets Python completado (Br=%.6g T, step=%.6g%%).', ...
+                    options.magnetsBr, options.magnetsStepPercent));
+            catch postErr
+                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                logFn('WARN', ts, ds.tag, ['Postproceso Magnets no ejecutado: ' compact_python_error(postErr.message)]);
+                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                logFn('WARN', ts, ds.tag, ...
+                    'Instala dependencias en el entorno Linux: python3 -m pip install --user numpy matplotlib');
+            end
         catch err
             if is_not_connected_error(err)
                 rethrow(err);
@@ -303,6 +318,52 @@ function run_bfov_python_postprocess(txtPath, magnetInfo, fovInfo, analysisName)
     end
 
     error('Fallo ejecutando postproceso Python BFOV: %s', strjoin(errors, ' | '));
+end
+
+% -------------------------------------------------------------------------
+function run_magnets_python_postprocess(magnetsTxtPath, magnetInfo, analysisName, br, stepPercent)
+    if nargin < 3 || isempty(analysisName)
+        analysisName = 'N/A';
+    end
+    if nargin < 4 || isempty(br)
+        br = 1.4;
+    end
+    if nargin < 5 || isempty(stepPercent)
+        stepPercent = 2;
+    end
+
+    scriptPath = fullfile(fileparts(mfilename('fullpath')), ...
+        'Comsol_extracted_histograms_BFOV_Magnets.py');
+
+    if ~isfile(scriptPath)
+        error('No se encontro script Python de postproceso: %s', scriptPath);
+    end
+
+    [txtDir, txtName, ~] = fileparts(magnetsTxtPath);
+    outputPng = fullfile(txtDir, [txtName '.png']);
+
+    args = [...
+        ' --file-path-m '    q(magnetsTxtPath), ...
+        ' --magnet-info '    q(magnetInfo), ...
+        ' --analysis '       q(analysisName), ...
+        ' --output-png-m '   q(outputPng), ...
+        ' --br '             q(num2str(br, '%.15g')), ...
+        ' --step-percent '   q(num2str(stepPercent, '%.15g')), ...
+        ' --magnets-only --no-show'];
+
+    pyCandidates = {'python', 'python3'};
+    errors = {};
+
+    for i = 1:numel(pyCandidates)
+        cmd = [pyCandidates{i} ' ' q(scriptPath) args];
+        [status, out] = system(cmd);
+        if status == 0
+            return;
+        end
+        errors{end+1} = sprintf('%s: %s', pyCandidates{i}, strtrim(out)); %#ok<AGROW>
+    end
+
+    error('Fallo ejecutando postproceso Python Magnets: %s', strjoin(errors, ' | '));
 end
 
 % -------------------------------------------------------------------------

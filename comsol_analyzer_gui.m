@@ -725,15 +725,19 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         end
 
         if options.enableMagnetsHistogram
-            [okMagnetsBins, magnetsHistBins] = ask_magnets_histogram_bins();
-            if ~okMagnetsBins
+            [okMagnetsCfg, magnetsHistBins, magnetsStepPercent, magnetsBr] = ask_magnets_histogram_config();
+            if ~okMagnetsCfg
                 ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
-                appendLog('INFO', ts, '', 'Extracción cancelada por el usuario (configuración de Magnets histogram bins).');
+                appendLog('INFO', ts, '', 'Extracción cancelada por el usuario (configuración de Magnets histogram).');
                 return;
             end
             options.magnetsHistBins = magnetsHistBins;
+            options.magnetsStepPercent = magnetsStepPercent;
+            options.magnetsBr = magnetsBr;
         else
             options.magnetsHistBins = getpref('ComsolAnalyzer', 'MagnetsHistogramBins', 100);
+            options.magnetsStepPercent = getpref('ComsolAnalyzer', 'MagnetsHistogramStepPercent', 2);
+            options.magnetsBr = getpref('ComsolAnalyzer', 'MagnetsHistogramBr', 1.4);
         end
 
         % Deshabilitar Run durante la extracción
@@ -1047,23 +1051,41 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         end
     end
 
-    function [ok, bins] = ask_magnets_histogram_bins()
+    function [ok, bins, stepPercent, br] = ask_magnets_histogram_config()
         ok = false;
         bins = getpref('ComsolAnalyzer', 'MagnetsHistogramBins', 100);
+        stepPercent = getpref('ComsolAnalyzer', 'MagnetsHistogramStepPercent', 2);
+        br = getpref('ComsolAnalyzer', 'MagnetsHistogramBr', 1.4);
 
-        answer = inputdlg({'Number of bins:'}, 'Magnets Histogram', 1, {num2str(bins)});
+        answer = inputdlg({'Number of bins:', 'Step percent (%):', 'Br (Tesla):'}, ...
+            'Magnets Histogram', 1, {num2str(bins), num2str(stepPercent), num2str(br)});
         if isempty(answer)
             return;
         end
 
-        value = str2double(strtrim(answer{1}));
-        if isnan(value) || ~isfinite(value) || value < 1 || floor(value) ~= value
+        binsValue = str2double(strtrim(answer{1}));
+        stepValue = str2double(strtrim(answer{2}));
+        brValue = str2double(strtrim(answer{3}));
+
+        if isnan(binsValue) || ~isfinite(binsValue) || binsValue < 1 || floor(binsValue) ~= binsValue
             uialert(fig, 'El valor de bins debe ser un entero positivo.', 'Valor inválido');
             return;
         end
+        if isnan(stepValue) || ~isfinite(stepValue) || stepValue <= 0
+            uialert(fig, 'El valor de step_percent debe ser mayor a 0.', 'Valor inválido');
+            return;
+        end
+        if isnan(brValue) || ~isfinite(brValue) || brValue <= 0
+            uialert(fig, 'El valor de Br debe ser mayor a 0.', 'Valor inválido');
+            return;
+        end
 
-        bins = value;
+        bins = floor(binsValue);
+        stepPercent = stepValue;
+        br = brValue;
         setpref('ComsolAnalyzer', 'MagnetsHistogramBins', bins);
+        setpref('ComsolAnalyzer', 'MagnetsHistogramStepPercent', stepPercent);
+        setpref('ComsolAnalyzer', 'MagnetsHistogramBr', br);
         ok = true;
     end
 

@@ -28,12 +28,17 @@ Analysis    =  "Nonlinear/B_r=1.38T/H_c=-868kA/m"#"Flat/B_r=1.4T"#"Nonlinear/B_r
 def parse_args():
     parser = argparse.ArgumentParser(description="BFOV histogram plot postprocess")
     parser.add_argument("--file-path", dest="file_path", help="Ruta al TXT BFOV")
+    parser.add_argument("--file-path-m", dest="file_path_m", help="Ruta al TXT Magnets histogram")
     parser.add_argument("--magnet-info", dest="magnet_info", help="Texto Magnet_info")
     parser.add_argument("--fov-info", dest="fov_info", help="Texto FOV_info")
     parser.add_argument("--analysis", dest="analysis", help="Texto Analysis")
     parser.add_argument("--output-png", dest="output_png", help="Ruta PNG de salida")
+    parser.add_argument("--output-png-m", dest="output_png_m", help="Ruta PNG de salida para Magnets")
+    parser.add_argument("--br", dest="br", type=float, help="Br en Tesla para Magnets")
+    parser.add_argument("--step-percent", dest="step_percent", type=float, help="Paso porcentual para bins de Magnets")
     parser.add_argument("--same-name-png", action="store_true", help="Guardar como <txt>.png")
     parser.add_argument("--bfov-only", action="store_true", help="Solo ejecutar bloque BFOV")
+    parser.add_argument("--magnets-only", action="store_true", help="Solo ejecutar bloque Magnets")
     parser.add_argument("--no-show", action="store_true", help="No abrir ventanas de plot")
     return parser.parse_args()
 
@@ -42,6 +47,8 @@ args = parse_args()
 
 if args.file_path:
     file_path = args.file_path
+if args.file_path_m:
+    file_path_M = args.file_path_m
 if args.magnet_info:
     Magnet_info = args.magnet_info
 if args.fov_info:
@@ -55,6 +62,9 @@ if args.no_show:
     except Exception:
         pass
     plt.ioff()
+
+if args.magnets_only:
+    args.bfov_only = True
 
 
 gamma = 42.58e6  # Hz/T
@@ -263,6 +273,13 @@ file_path_M =  r"Z:\Projects\Kepler\Halbach\50mT_891ppms_cylindricalCubes\Magnet
 Br = 1.4  # Tesla 
 step_percent = 2
 
+if args.file_path_m:
+    file_path_M = args.file_path_m
+if args.br is not None:
+    Br = args.br
+if args.step_percent is not None:
+    step_percent = args.step_percent
+
 # Lectura del archivo
 
 data_M = np.loadtxt(file_path_M, comments='%')
@@ -435,7 +452,12 @@ fig2.text(0.99, 0.01, fecha,
           color='gray',
           alpha=0.8)
 # Guardar imagen
-output_path_M = file_path_M.replace(".txt", "_magnetization.png")
+if args.output_png_m:
+    output_path_M = args.output_png_m
+elif args.same_name_png:
+    output_path_M = os.path.splitext(file_path_M)[0] + ".png"
+else:
+    output_path_M = file_path_M.replace(".txt", "_magnetization.png")
 plt.savefig(output_path_M, dpi=300, bbox_inches='tight')
 #plt.xlim(1.34,1.41)
 plt.ylim(-0.1,1.09)
