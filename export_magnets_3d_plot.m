@@ -51,11 +51,10 @@ function export_magnets_3d_plot(model, datasetTag, outputPngPath, outputTxtPath)
         model.result(pg3dTag).feature('vol1').set('colortable', 'Inferno');
         model.result(pg3dTag).run;
 
-        % PNG
+        % PNG via mphplot (COMSOL Image export.run en PlotGroup3D provoca NPE
+        % que desconecta el servidor, inutilizando cualquier fallback posterior)
         ensure_parent_dir_exists(outputPngPath);
-        pngTempPath = build_temp_export_path('png', datasetTag);
-        export_png_with_strategies(model, pg3dTag, imgTag, pngTempPath);
-        move_file_overwrite(pngTempPath, outputPngPath);
+        export_png_via_mphplot(model, pg3dTag, outputPngPath);
 
         % TXT (mismo Plot export de vol1 que BFOV)
         if ~isempty(outputTxtPath)
@@ -134,72 +133,6 @@ function ensure_parent_dir_exists(filePath)
     end
 end
 
-% -------------------------------------------------------------------------
-function tempPath = build_temp_export_path(ext, datasetTag)
-    safeTag = regexprep(datasetTag, '[^a-zA-Z0-9_]', '_');
-    stamp = regexprep(char(java.util.UUID.randomUUID()), '-', '');
-    tempPath = fullfile(tempdir, sprintf('comsol_magnets3d_%s_%s.%s', safeTag, stamp, ext));
-end
-
-% -------------------------------------------------------------------------
-function move_file_overwrite(srcPath, dstPath)
-    if ~exist(srcPath, 'file')
-        error('El archivo temporal de export no existe: %s', srcPath);
-    end
-    ensure_parent_dir_exists(dstPath);
-    if exist(dstPath, 'file'); delete(dstPath); end
-    [ok, msg] = movefile(srcPath, dstPath, 'f');
-    if ~ok; error('No se pudo mover archivo temporal a destino final: %s', msg); end
-end
-
-% -------------------------------------------------------------------------
-% Identica a export_png_with_strategies de export_dataset.m
-% -------------------------------------------------------------------------
-function export_png_with_strategies(model, pg3dTag, imgTag, pngOutPath)
-    % Estrategia A: COMSOL Image export nativo con legend3d=on.
-    try
-        try; model.result.export.remove(imgTag); catch; end
-        model.result.export.create(imgTag, pg3dTag, 'Image');
-        model.result.export(imgTag).set('size', 'current');
-        model.result.export(imgTag).set('unit', 'px');
-        model.result.export(imgTag).set('height', '600');
-        model.result.export(imgTag).set('width', '800');
-        model.result.export(imgTag).set('lockratio', 'off');
-        model.result.export(imgTag).set('resolution', '96');
-        model.result.export(imgTag).set('antialias', 'on');
-        model.result.export(imgTag).set('zoomextents', 'off');
-        model.result.export(imgTag).set('fontsize', '9');
-        model.result.export(imgTag).set('colortheme', 'globaltheme');
-        model.result.export(imgTag).set('customcolor', [1 1 1]);
-        model.result.export(imgTag).set('background', 'color');
-        model.result.export(imgTag).set('gltfincludelines', 'on');
-        model.result.export(imgTag).set('title3d', 'on');
-        model.result.export(imgTag).set('legend3d', 'on');
-        model.result.export(imgTag).set('logo3d', 'on');
-        model.result.export(imgTag).set('options3d', 'off');
-        model.result.export(imgTag).set('axisorientation', 'on');
-        model.result.export(imgTag).set('grid', 'on');
-        model.result.export(imgTag).set('target', 'file');
-        model.result.export(imgTag).set('qualitylevel', '92');
-        model.result.export(imgTag).set('qualityactive', 'off');
-        model.result.export(imgTag).set('imagetype', 'png');
-        model.result.export(imgTag).set('lockview', 'off');
-        model.result.export(imgTag).set('highprecisioncolor', 'off');
-        model.result.export(imgTag).set('pngfilename', pngOutPath);
-        model.result.export(imgTag).run;
-        try; model.result.export.remove(imgTag); catch; end
-        return;
-    catch errA
-        try; model.result.export.remove(imgTag); catch; end
-    end
-
-    % Estrategia B (fallback): mphplot + exportgraphics.
-    try
-        export_png_via_mphplot(model, pg3dTag, pngOutPath);
-    catch errB
-        error('PNG COMSOL export.run fallo: %s | PNG mphplot fallo: %s', errA.message, errB.message);
-    end
-end
 
 % -------------------------------------------------------------------------
 function export_png_via_mphplot(model, pg3dTag, pngOutPath)
