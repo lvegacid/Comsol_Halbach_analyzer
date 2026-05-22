@@ -60,15 +60,25 @@ function summary = extraction_controller(model, datasets, outputDir, modelName, 
                     logFn('WARN', ts, ds.tag, ['Postproceso BFOV no ejecutado: ' compact_python_error(postErr.message)]);
                     ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
                     logFn('WARN', ts, ds.tag, ...
-                        'Instala dependencias en el entorno Linux: python3 -m pip install --user numpy matplotlib');
+                        'Instala dependencias Python (numpy, matplotlib). Ejemplo: python -m pip install numpy matplotlib');
                 end
             end
 
             if options.enableCustomCoordinates
                 ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
-                logFn('INFO', ts, ds.tag, sprintf(['Iniciando exportación B_FOV Custom Coordinates ' ...
-                    '(nTheta=%d, nPhi=%d, R=%.6f m)...'], ...
-                    options.coordConfig.nTheta, options.coordConfig.nPhi, options.coordConfig.R));
+                if isfield(options.coordConfig, 'source') && strcmpi(options.coordConfig.source, 'file')
+                    sourceFileName = '';
+                    if isfield(options.coordConfig, 'sourceFilePath') && ~isempty(options.coordConfig.sourceFilePath)
+                        [~, sourceFileName, ext] = fileparts(options.coordConfig.sourceFilePath);
+                        sourceFileName = [sourceFileName ext];
+                    end
+                    logFn('INFO', ts, ds.tag, sprintf(['Iniciando exportación B_FOV Custom Coordinates ' ...
+                        '(From file: %s | cols=%s)...'], sourceFileName, mat2str(options.coordConfig.coordColumns)));
+                else
+                    logFn('INFO', ts, ds.tag, sprintf(['Iniciando exportación B_FOV Custom Coordinates ' ...
+                        '(nTheta=%d, nPhi=%d, R=%.6f m)...'], ...
+                        options.coordConfig.nTheta, options.coordConfig.nPhi, options.coordConfig.R));
+                end
                 [coordTxtPath, coordPngPath] = export_custom_coordinates(model, ds.tag, folderPath, options.coordConfig);
                 ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
                 logFn('INFO', ts, ds.tag, sprintf('B_FOV Custom Coordinates exportado: %s | %s', coordTxtPath, coordPngPath));
@@ -116,7 +126,11 @@ function options = default_extraction_options()
     options.magnetsStepPercent = 2;
     options.magnetsBr = 1.4;
     options.coordConfig = struct('model', 'Spherical coordinates', ...
-        'nTheta', 100, 'nPhi', 100, 'R', 0.1);
+        'source', 'spherical', ...
+        'nTheta', 100, 'nPhi', 100, 'R', 0.1, ...
+        'coordFilePath', '', ...
+        'coordColumns', [1 2 3], ...
+        'sourceFilePath', '');
 end
 
 % -------------------------------------------------------------------------
@@ -140,6 +154,10 @@ function options = normalize_extraction_options(options)
         if ~isfield(options.coordConfig, f)
             options.coordConfig.(f) = defaults.coordConfig.(f);
         end
+    end
+
+    if isfield(options.coordConfig, 'coordColumns')
+        options.coordConfig.coordColumns = double(options.coordConfig.coordColumns(:).');
     end
 end
 
@@ -297,21 +315,30 @@ function run_bfov_python_postprocess(txtPath, magnetInfo, fovInfo, analysisName)
     [txtDir, txtName, ~] = fileparts(txtPath);
     outputPng = fullfile(txtDir, [txtName '.png']);
 
+    [txtPathForPython, outputPngForPython, cleanupFolder] = prepare_python_temp_io(txtPath, outputPng);
+    cleanupObj = onCleanup(@() cleanup_temp_folder(cleanupFolder)); %#ok<NASGU>
+
     args = [...
-        ' --file-path '    q(txtPath), ...
+        ' --file-path '    q(txtPathForPython), ...
         ' --magnet-info '  q(magnetInfo), ...
         ' --fov-info '     q(fovInfo), ...
         ' --analysis '     q(analysisName), ...
-        ' --output-png '   q(outputPng), ...
+        ' --output-png '   q(outputPngForPython), ...
         ' --bfov-only --no-show'];
 
-    pyCandidates = {'python', 'python3'};
+    pyCandidates = get_python_command_candidates();
     errors = {};
 
     for i = 1:numel(pyCandidates)
         cmd = [pyCandidates{i} ' ' q(scriptPath) args];
         [status, out] = system(cmd);
         if status == 0
+            if ~strcmp(outputPngForPython, outputPng)
+                [okCopy, copyMsg] = copyfile(outputPngForPython, outputPng, 'f');
+                if ~okCopy
+                    error('PNG generado por Python, pero no se pudo copiar al destino final: %s', copyMsg);
+                end
+            end
             return;
         end
         errors{end+1} = sprintf('%s: %s', pyCandidates{i}, strtrim(out)); %#ok<AGROW>
@@ -364,6 +391,71 @@ function run_magnets_python_postprocess(magnetsTxtPath, magnetInfo, analysisName
     end
 
     error('Fallo ejecutando postproceso Python Magnets: %s', strjoin(errors, ' | '));
+end
+
+% -------------------------------------------------------------------------
+function pyCandidates = get_python_command_candidates()
+    pyCandidates = {};
+
+    % 1) Prefer Python configured in MATLAB.
+    try
+        pe = pyenv;
+        if isprop(pe, 'Executable')
+            exePath = char(pe.Executable);
+            if endsWith(lower(exePath), 'pythonw.exe')
+                altExe = [exePath(1:end-11) 'python.exe'];
+                if isfile(altExe)
+                    exePath = altExe;
+                end
+            end
+            if ~isempty(strtrim(exePath)) && isfile(exePath)
+                pyCandidates{end+1} = q(exePath); %#ok<AGROW>
+            end
+        end
+    catch
+    end
+
+    % 2) Common command names.
+    defaults = {'python', 'python3', 'py -3', 'py'};
+    for i = 1:numel(defaults)
+        if ~any(strcmp(pyCandidates, defaults{i}))
+            pyCandidates{end+1} = defaults{i}; %#ok<AGROW>
+        end
+    end
+end
+
+% -------------------------------------------------------------------------
+function [txtPathForPython, outputPngForPython, cleanupFolder] = prepare_python_temp_io(txtPath, outputPng)
+    txtPathForPython = txtPath;
+    outputPngForPython = outputPng;
+    cleanupFolder = '';
+
+    % Use short temp paths on Windows to avoid MAX_PATH failures in Python.
+    if ispc
+        cleanupFolder = tempname;
+        mkdir(cleanupFolder);
+
+        txtPathForPython = fullfile(cleanupFolder, 'BFOV_histogram_input.txt');
+        outputPngForPython = fullfile(cleanupFolder, 'BFOV_histogram_output.png');
+
+        [okCopy, copyMsg] = copyfile(txtPath, txtPathForPython, 'f');
+        if ~okCopy
+            error('No se pudo copiar el BFOV histogram TXT a ruta temporal corta: %s', copyMsg);
+        end
+    end
+end
+
+% -------------------------------------------------------------------------
+function cleanup_temp_folder(folderPath)
+    if isempty(folderPath)
+        return;
+    end
+    if isfolder(folderPath)
+        try
+            rmdir(folderPath, 's');
+        catch
+        end
+    end
 end
 
 % -------------------------------------------------------------------------

@@ -954,63 +954,256 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
     function [ok, cfg] = ask_custom_coordinates_config()
         ok = false;
         cfg = struct('model', 'Spherical coordinates', ...
+            'source', 'spherical', ...
             'nTheta', getpref('ComsolAnalyzer', 'Coord_nTheta', 100), ...
             'nPhi',   getpref('ComsolAnalyzer', 'Coord_nPhi', 100), ...
-            'R',      getpref('ComsolAnalyzer', 'Coord_R', 0.1));
+            'R',      getpref('ComsolAnalyzer', 'Coord_R', 0.1), ...
+            'coordFilePath', '', ...
+            'coordColumns', [1 2 3], ...
+            'sourceFilePath', '');
 
         dlg = uifigure('Name', 'B_FOV Custom Coordinates', ...
-            'Position', [280 220 360 240], ...
+            'Position', [280 180 480 350], ...
             'WindowStyle', 'modal', ...
             'Resize', 'off');
         dlg.Tag = 'ComsolAnalyzerChildDialog';
         registerChildDialog(dlg);
 
-        uilabel(dlg, 'Text', 'Model selection', 'Position', [20 194 130 22], 'FontWeight', 'bold');
+        uilabel(dlg, 'Text', 'Model selection', 'Position', [20 298 130 22], 'FontWeight', 'bold');
         modelDrop = uidropdown(dlg, ...
-            'Items', {'Spherical coordinates'}, ...
+            'Items', {'Spherical coordinates', 'From file'}, ...
             'Value', 'Spherical coordinates', ...
-            'Position', [160 194 180 22]);
+            'Position', [160 298 260 22]);
 
-        uilabel(dlg, 'Text', 'n_theta', 'Position', [20 152 80 22], 'FontWeight', 'bold');
+        uilabel(dlg, 'Text', 'n_theta', 'Position', [20 246 80 22], 'FontWeight', 'bold');
         nThetaField = uieditfield(dlg, 'numeric', ...
-            'Position', [160 152 180 22], ...
+            'Position', [160 246 260 22], ...
             'RoundFractionalValues', 'on', ...
             'Limits', [1 Inf], ...
             'LowerLimitInclusive', true, ...
             'Value', cfg.nTheta);
 
-        uilabel(dlg, 'Text', 'n_phi', 'Position', [20 116 80 22], 'FontWeight', 'bold');
+        uilabel(dlg, 'Text', 'n_phi', 'Position', [20 210 80 22], 'FontWeight', 'bold');
         nPhiField = uieditfield(dlg, 'numeric', ...
-            'Position', [160 116 180 22], ...
+            'Position', [160 210 260 22], ...
             'RoundFractionalValues', 'on', ...
             'Limits', [1 Inf], ...
             'LowerLimitInclusive', true, ...
             'Value', cfg.nPhi);
 
-        uilabel(dlg, 'Text', 'R [m]', 'Position', [20 80 80 22], 'FontWeight', 'bold');
+        uilabel(dlg, 'Text', 'R [m]', 'Position', [20 174 80 22], 'FontWeight', 'bold');
         rField = uieditfield(dlg, 'numeric', ...
-            'Position', [160 80 180 22], ...
+            'Position', [160 174 260 22], ...
             'Limits', [eps Inf], ...
             'LowerLimitInclusive', true, ...
             'Value', cfg.R);
 
+        uilabel(dlg, 'Text', 'Coordinate file', 'Position', [20 128 130 22], 'FontWeight', 'bold');
+        filePathField = uieditfield(dlg, 'text', ...
+            'Position', [160 128 180 22], ...
+            'Placeholder', 'Select a .txt file...');
+        btnBrowseFile = uibutton(dlg, 'push', ...
+            'Text', 'Browse', ...
+            'Position', [350 128 70 22], ...
+            'ButtonPushedFcn', @browseCoordinateFile);
+
+        uilabel(dlg, 'Text', 'Columns x / y / z', 'Position', [20 92 130 22], 'FontWeight', 'bold');
+        xColField = uieditfield(dlg, 'numeric', ...
+            'Position', [160 92 54 22], ...
+            'RoundFractionalValues', 'on', ...
+            'Limits', [1 Inf], ...
+            'LowerLimitInclusive', true, ...
+            'Value', 1);
+        yColField = uieditfield(dlg, 'numeric', ...
+            'Position', [220 92 54 22], ...
+            'RoundFractionalValues', 'on', ...
+            'Limits', [1 Inf], ...
+            'LowerLimitInclusive', true, ...
+            'Value', 2);
+        zColField = uieditfield(dlg, 'numeric', ...
+            'Position', [280 92 54 22], ...
+            'RoundFractionalValues', 'on', ...
+            'Limits', [1 Inf], ...
+            'LowerLimitInclusive', true, ...
+            'Value', 3);
+        fileInfoLabel = uilabel(dlg, 'Text', '', ...
+            'Position', [20 56 420 20], ...
+            'FontColor', [0.35 0.35 0.35]);
+
         btnOk = uibutton(dlg, 'push', ...
             'Text', 'OK', ...
-            'Position', [160 24 80 30]);
+            'Position', [160 16 80 30]);
         btnCancel = uibutton(dlg, 'push', ...
             'Text', 'Cancel', ...
-            'Position', [260 24 80 30]);
+            'Position', [260 16 80 30]);
 
         btnOk.ButtonPushedFcn = @on_ok;
         btnCancel.ButtonPushedFcn = @on_cancel;
+        modelDrop.ValueChangedFcn = @(~,~) updateDialogMode();
         dlg.CloseRequestFcn = @on_cancel;
+
+        updateDialogMode();
 
         uiwait(dlg);
 
+        function updateDialogMode()
+            isFileMode = strcmp(modelDrop.Value, 'From file');
+
+            if isFileMode
+                nThetaField.Enable = 'off';
+                nPhiField.Enable = 'off';
+                rField.Enable = 'off';
+                filePathField.Enable = 'on';
+                btnBrowseFile.Enable = 'on';
+                xColField.Enable = 'on';
+                yColField.Enable = 'on';
+                zColField.Enable = 'on';
+            else
+                nThetaField.Enable = 'on';
+                nPhiField.Enable = 'on';
+                rField.Enable = 'on';
+                filePathField.Enable = 'off';
+                btnBrowseFile.Enable = 'off';
+                xColField.Enable = 'off';
+                yColField.Enable = 'off';
+                zColField.Enable = 'off';
+            end
+
+            if isFileMode
+                if isempty(strtrim(filePathField.Value))
+                    fileInfoLabel.Text = 'Select a .txt file with at least 3 numeric columns.';
+                end
+            else
+                fileInfoLabel.Text = '';
+            end
+        end
+
+        function browseCoordinateFile(~, ~)
+            startDir = '';
+            currentPath = strtrim(filePathField.Value);
+            if ~isempty(currentPath)
+                currentDir = fileparts(currentPath);
+                if ~isempty(currentDir) && isfolder(currentDir)
+                    startDir = currentDir;
+                end
+            end
+
+            [fname, fpath] = uigetfile({'*.txt', 'Text files (*.txt)'}, ...
+                'Select coordinate file', startDir);
+            if isequal(fname, 0)
+                return;
+            end
+
+            fullPath = fullfile(fpath, fname);
+            filePathField.Value = fullPath;
+
+            try
+                data = readmatrix(fullPath, 'FileType', 'text', 'CommentStyle', '%');
+            catch err
+                fileInfoLabel.Text = '';
+                uialert(dlg, ['No se pudo leer el archivo de coordenadas: ' err.message], 'Archivo inválido');
+                return;
+            end
+
+            if isempty(data) || size(data, 2) < 3
+                fileInfoLabel.Text = '';
+                uialert(dlg, 'El archivo .txt debe contener al menos 3 columnas.', 'Archivo inválido');
+                return;
+            end
+
+            if size(data, 2) > 3
+                msg = sprintf('El archivo tiene %d columnas. Se usaran las columnas seleccionadas.', size(data, 2));
+                fileInfoLabel.Text = msg;
+                uialert(dlg, msg, 'Archivo con columnas extra');
+            else
+                fileInfoLabel.Text = sprintf('Archivo cargado con %d columna(s).', size(data, 2));
+            end
+
+            xColField.Value = 1;
+            yColField.Value = 2;
+            zColField.Value = 3;
+        end
+
         function on_ok(~, ~)
-            nTheta = nThetaField.Value;
-            nPhi = nPhiField.Value;
-            rVal = rField.Value;
+            candidateCfg = struct('model', modelDrop.Value, ...
+                'source', 'spherical', ...
+                'nTheta', floor(nThetaField.Value), ...
+                'nPhi', floor(nPhiField.Value), ...
+                'R', rField.Value, ...
+                'coordFilePath', '', ...
+                'coordColumns', [1 2 3], ...
+                'sourceFilePath', '');
+
+            if strcmp(modelDrop.Value, 'From file')
+                sourceFilePath = strtrim(filePathField.Value);
+                coordColumns = [floor(xColField.Value), floor(yColField.Value), floor(zColField.Value)];
+
+                if isempty(sourceFilePath) || ~isfile(sourceFilePath)
+                    uialert(dlg, 'Selecciona un archivo .txt de coordenadas válido.', 'Archivo inválido');
+                    return;
+                end
+
+                if any(coordColumns < 1) || numel(unique(coordColumns)) ~= 3
+                    uialert(dlg, 'Las columnas de coordenadas deben ser enteros positivos y distintos.', 'Columnas inválidas');
+                    return;
+                end
+
+                try
+                    data = readmatrix(sourceFilePath, 'FileType', 'text', 'CommentStyle', '%');
+                catch err
+                    uialert(dlg, ['No se pudo leer el archivo de coordenadas: ' err.message], 'Archivo inválido');
+                    return;
+                end
+
+                if isempty(data) || size(data, 2) < 3
+                    uialert(dlg, 'El archivo .txt debe contener al menos 3 columnas.', 'Archivo inválido');
+                    return;
+                end
+
+                if size(data, 2) < max(coordColumns)
+                    uialert(dlg, sprintf('El archivo solo contiene %d columnas y se solicitaron las columnas %s.', ...
+                        size(data, 2), mat2str(coordColumns)), 'Columnas inválidas');
+                    return;
+                end
+
+                if size(data, 2) > 3
+                    msg = sprintf('El archivo tiene %d columnas. Se usaran las columnas %d, %d y %d.', ...
+                        size(data, 2), coordColumns(1), coordColumns(2), coordColumns(3));
+                    fileInfoLabel.Text = msg;
+                    uialert(dlg, msg, 'Archivo con columnas extra');
+                end
+
+                coords = data(:, coordColumns);
+                coords = coords(all(isfinite(coords), 2), :);
+
+                if isempty(coords)
+                    uialert(dlg, 'No se encontraron coordenadas validas en las columnas seleccionadas.', 'Archivo inválido');
+                    return;
+                end
+
+                candidateCfg.source = 'file';
+                candidateCfg.coordFilePath = sourceFilePath;
+                candidateCfg.coordColumns = coordColumns;
+                candidateCfg.sourceFilePath = sourceFilePath;
+
+                previewText = sprintf('Preview de coordenadas desde archivo: %s | columnas %d, %d, %d | puntos=%d', ...
+                    sourceFilePath, coordColumns(1), coordColumns(2), coordColumns(3), size(coords, 1));
+                shouldProceed = preview_custom_coordinate_configuration(candidateCfg, coords, previewText);
+                if ~shouldProceed
+                    return;
+                end
+
+                cfg = candidateCfg;
+                ok = true;
+                uiresume(dlg);
+                unregisterChildDialog(dlg);
+                delete(dlg);
+                return;
+            end
+
+            nTheta = candidateCfg.nTheta;
+            nPhi = candidateCfg.nPhi;
+            rVal = candidateCfg.R;
 
             if any([isnan(nTheta), isnan(nPhi), isnan(rVal)]) || ...
                ~isfinite(nTheta) || ~isfinite(nPhi) || ~isfinite(rVal) || ...
@@ -1019,12 +1212,11 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
                 return;
             end
 
-            candidateCfg = struct('model', modelDrop.Value, ...
-                'nTheta', floor(nTheta), ...
-                'nPhi', floor(nPhi), ...
-                'R', rVal);
+            coords = build_spherical_coordinate_matrix(candidateCfg.nTheta, candidateCfg.nPhi, candidateCfg.R);
+            previewText = sprintf('Preview del archivo Coordinates generado. nTheta=%d, nPhi=%d, R=%.6f m, puntos=%d', ...
+                candidateCfg.nTheta, candidateCfg.nPhi, candidateCfg.R, size(coords, 1));
 
-            shouldProceed = preview_custom_coordinate_configuration(candidateCfg);
+            shouldProceed = preview_custom_coordinate_configuration(candidateCfg, coords, previewText);
             if ~shouldProceed
                 return;
             end
@@ -1089,15 +1281,11 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         ok = true;
     end
 
-    function shouldProceed = preview_custom_coordinate_configuration(coordCfg)
+    function shouldProceed = preview_custom_coordinate_configuration(coordCfg, coords, previewText)
         shouldProceed = false;
         previewFig = [];
-        previewFilePath = '';
 
         try
-            coords = build_spherical_coordinate_matrix(coordCfg.nTheta, coordCfg.nPhi, coordCfg.R);
-            previewFilePath = write_coordinate_preview_file(coordCfg, coords);
-
             previewFig = uifigure('Name', 'Custom Coordinates Preview', ...
                 'Position', [220 120 820 680], ...
                 'WindowStyle', 'modal', ...
@@ -1106,16 +1294,9 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
             registerChildDialog(previewFig);
 
             uilabel(previewFig, ...
-                'Text', sprintf(['Preview del archivo Coordinates generado. ' ...
-                    'nTheta=%d, nPhi=%d, R=%.6f m, puntos=%d'], ...
-                    coordCfg.nTheta, coordCfg.nPhi, coordCfg.R, size(coords, 1)), ...
+                'Text', previewText, ...
                 'Position', [20 640 760 22], ...
                 'FontWeight', 'bold');
-
-            uilabel(previewFig, ...
-                'Text', ['Archivo temporal: ' previewFilePath], ...
-                'Position', [20 615 760 22], ...
-                'Interpreter', 'none');
 
             ax = uiaxes(previewFig, 'Position', [20 90 780 510]);
             scatter3(ax, coords(:, 1), coords(:, 2), coords(:, 3), 40, coords(:, 3), 'filled');
@@ -1125,7 +1306,7 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
             xlabel(ax, 'X [m]');
             ylabel(ax, 'Y [m]');
             zlabel(ax, 'Z [m]');
-            title(ax, 'Preview de puntos esfericos');
+            title(ax, 'Preview de puntos seleccionados');
             colormap(ax, inferno_colormap(256));
 
             btnYes = uibutton(previewFig, 'push', ...
@@ -1143,12 +1324,6 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
             previewFig.CloseRequestFcn = @on_preview_no;
             uiwait(previewFig);
         catch err
-            if ~isempty(previewFilePath) && exist(previewFilePath, 'file')
-                try
-                    delete(previewFilePath);
-                catch
-                end
-            end
             if ~isempty(previewFig) && isvalid(previewFig)
                 unregisterChildDialog(previewFig);
                 delete(previewFig);
@@ -1176,12 +1351,6 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
                 end
                 unregisterChildDialog(previewFig);
                 delete(previewFig);
-            end
-            if ~isempty(previewFilePath) && exist(previewFilePath, 'file')
-                try
-                    delete(previewFilePath);
-                catch
-                end
             end
         end
     end

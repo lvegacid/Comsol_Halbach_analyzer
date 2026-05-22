@@ -19,29 +19,75 @@ function [outputDataPath, outputPngPath] = export_custom_coordinates(model, data
         error('Se requiere coordCfg con model, nTheta, nPhi y R.');
     end
 
-    coordModel = 'Spherical coordinates';
-    if isfield(coordCfg, 'model') && ~isempty(coordCfg.model)
-        coordModel = char(coordCfg.model);
+    coordSource = 'spherical';
+    if isfield(coordCfg, 'source') && ~isempty(coordCfg.source)
+        coordSource = lower(strtrim(char(coordCfg.source)));
     end
-    if ~strcmpi(strtrim(coordModel), 'Spherical coordinates')
-        error('Solo se soporta "Spherical coordinates" en esta versión.');
+    isFileSource = strcmp(coordSource, 'file');
+    coordFilePath = '';
+
+    switch coordSource
+        case 'file'
+            sourceFilePath = get_struct_value(coordCfg, 'sourceFilePath', '');
+            if isempty(sourceFilePath) && isfield(coordCfg, 'coordFilePath')
+                sourceFilePath = coordCfg.coordFilePath;
+            end
+
+            coordColumns = get_struct_value(coordCfg, 'coordColumns', [1 2 3]);
+            coordColumns = double(coordColumns(:).');
+
+            if isempty(sourceFilePath) || ~isfile(sourceFilePath)
+                error('Se requiere un archivo de coordenadas valido para el modo From file.');
+            end
+
+            if numel(coordColumns) ~= 3 || any(coordColumns < 1) || any(floor(coordColumns) ~= coordColumns) || ...
+               numel(unique(coordColumns)) ~= 3
+                error('Las columnas de coordenadas deben ser tres enteros positivos y distintos.');
+            end
+
+            data = readmatrix(sourceFilePath, 'FileType', 'text', 'CommentStyle', '%');
+            if isempty(data) || size(data, 2) < 3
+                error('El archivo de coordenadas debe contener al menos 3 columnas.');
+            end
+            if size(data, 2) < max(coordColumns)
+                error('El archivo de coordenadas solo tiene %d columnas y se solicitaron las columnas %s.', ...
+                    size(data, 2), mat2str(coordColumns));
+            end
+
+            coords = data(:, coordColumns);
+            coords = coords(all(isfinite(coords), 2), :);
+            if isempty(coords)
+                error('No se encontraron coordenadas validas en las columnas seleccionadas.');
+            end
+
+            coordFilePath = build_temp_export_path('txt', ['coord_' datasetTag]);
+            writematrix(coords, coordFilePath, 'Delimiter', 'tab');
+
+            [~, sourceBaseName, ~] = fileparts(sourceFilePath);
+            safeBaseName = make_safe_name(sourceBaseName);
+            baseTag = sprintf('FromFile_%s_cols_%d_%d_%d', safeBaseName, coordColumns(1), coordColumns(2), coordColumns(3));
+
+        otherwise
+            nTheta = get_struct_value(coordCfg, 'nTheta', 100);
+            nPhi   = get_struct_value(coordCfg, 'nPhi', 100);
+            rMeters = get_struct_value(coordCfg, 'R', 0.1);
+
+            nTheta = floor(double(nTheta));
+            nPhi   = floor(double(nPhi));
+            rMeters = double(rMeters);
+
+            if ~isfinite(nTheta) || nTheta < 1 || ~isfinite(nPhi) || nPhi < 1 || ...
+               ~isfinite(rMeters) || rMeters <= 0
+                error('Parámetros inválidos de coordenadas: nTheta, nPhi y R deben ser positivos.');
+            end
+
+            rMmToken = format_mm_token(rMeters * 1000);
+            baseTag = sprintf('Spherical_coord_ntheta_%d_nphi_%d_R%smm', nTheta, nPhi, rMmToken);
+
+            coordFilePath = build_temp_export_path('txt', ['coord_' datasetTag]);
+            generate_spherical_coordinates_file(coordFilePath, nTheta, nPhi, rMeters);
+            validate_generated_coordinate_file(coordFilePath, rMeters);
     end
-
-    nTheta = get_struct_value(coordCfg, 'nTheta', 100);
-    nPhi   = get_struct_value(coordCfg, 'nPhi', 100);
-    rMeters = get_struct_value(coordCfg, 'R', 0.1);
-
-    nTheta = floor(double(nTheta));
-    nPhi   = floor(double(nPhi));
-    rMeters = double(rMeters);
-
-    if ~isfinite(nTheta) || nTheta < 1 || ~isfinite(nPhi) || nPhi < 1 || ...
-       ~isfinite(rMeters) || rMeters <= 0
-        error('Parámetros inválidos de coordenadas: nTheta, nPhi y R deben ser positivos.');
-    end
-
-    rMmToken = format_mm_token(rMeters * 1000);
-    baseTag = sprintf('Spherical_coord_ntheta_%d_nphi_%d_R%smm', nTheta, nPhi, rMmToken);
 
     coordFileName = ['Coordinates_' baseTag '.txt'];
     dataFileName  = ['B_coordinates_' baseTag '.txt'];
@@ -49,7 +95,6 @@ function [outputDataPath, outputPngPath] = export_custom_coordinates(model, data
 
     outputDataPath = fullfile(outputDir, dataFileName);
     outputPngPath  = fullfile(outputDir, pngFileName);
-    coordFilePath  = build_temp_export_path('txt', ['coord_' datasetTag]);
     tempDataPath   = build_temp_export_path('txt', ['data_' datasetTag]);
 
     exportTag = ['data_' regexprep(datasetTag, '[^a-zA-Z0-9_]', '_')];
@@ -57,9 +102,6 @@ function [outputDataPath, outputPngPath] = export_custom_coordinates(model, data
     try
         ensure_parent_dir_exists(outputDataPath);
         ensure_parent_dir_exists(outputPngPath);
-
-        generate_spherical_coordinates_file(coordFilePath, nTheta, nPhi, rMeters);
-        validate_generated_coordinate_file(coordFilePath, rMeters);
 
         try; model.result.export.remove(exportTag); catch; end
 
@@ -73,7 +115,9 @@ function [outputDataPath, outputPngPath] = export_custom_coordinates(model, data
         model.result.export(exportTag).set('filename', tempDataPath);
         model.result.export(exportTag).run;
 
-        validate_exported_coordinate_radius(tempDataPath, rMeters);
+        if ~isFileSource
+            validate_exported_coordinate_radius(tempDataPath, rMeters);
+        end
         create_custom_coordinates_png(tempDataPath, outputPngPath);
         move_file_overwrite(tempDataPath, outputDataPath);
 
@@ -191,7 +235,7 @@ function create_custom_coordinates_png(inputTxtPath, outputPngPath)
     xlabel(ax, 'X [m]');
     ylabel(ax, 'Y [m]');
     zlabel(ax, 'Z [m]');
-    title(ax, 'B_FOV Custom Coordinates (By)', 'Interpreter', 'none');
+    title(ax, 'B_FOV Custom Coordinates', 'Interpreter', 'none');
     colormap(ax, inferno_colormap(256));
     cb = colorbar(ax);
     cb.Label.String = 'By [mT]';
