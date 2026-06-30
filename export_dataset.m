@@ -18,7 +18,22 @@
 % Nota:
 %   Ademas del TXT principal (histograma), se genera un TXT extra para el
 %   plot 3D con sufijo "_plot3d".
-function export_dataset(model, datasetTag, txtPath, pngPath)
+function export_dataset(model, datasetTag, txtPath, pngPath, selectionTag, selectionLabel, histBins)
+
+    if nargin < 5
+        selectionTag = '';
+    end
+    if nargin < 6
+        selectionLabel = '';
+    end
+    if nargin < 7 || isempty(histBins)
+        histBins = 100;
+    end
+
+    histBins = floor(double(histBins));
+    if ~isfinite(histBins) || histBins < 1
+        histBins = 100;
+    end
 
     newDsetTag   = ['dset_fov_' datasetTag];
     pg3dTag      = ['pg3d_' datasetTag];
@@ -36,12 +51,21 @@ function export_dataset(model, datasetTag, txtPath, pngPath)
         % Validar dataset origen recibido desde la GUI.
         assert_dataset_exists(model, datasetTag, 'origen');
 
-        % 1) FOV en Definitions (comp1)
-        fovTag = find_fov_selection_tag(model);
-        if isempty(fovTag)
-            avail = list_comp1_selections(model);
-            error(['No se encontro selection con label "FOV" en Definitions (comp1).\n' ...
-                   'Selections comp1: %s'], avail);
+        % 1) Seleccion en Definitions (comp1): FOV por defecto, o custom si se recibe.
+        selectedTag = strtrim(char(selectionTag));
+        if isempty(selectedTag)
+            selectedTag = find_fov_selection_tag(model);
+            if isempty(selectedTag)
+                avail = list_comp1_selections(model);
+                error(['No se encontro selection con label "FOV" en Definitions (comp1).\n' ...
+                       'Selections comp1: %s'], avail);
+            end
+        else
+            if ~selection_exists_in_comp1(model, selectedTag)
+                avail = list_comp1_selections(model);
+                error(['No se encontro la selection "%s" en Definitions (comp1).\n' ...
+                       'Selections comp1: %s'], selectedTag, avail);
+            end
         end
 
         % 2) Duplicar dataset
@@ -53,17 +77,20 @@ function export_dataset(model, datasetTag, txtPath, pngPath)
 
         assert_dataset_exists(model, newDsetTag, 'duplicado');
 
-        % 3) Asignar selection FOV al dataset duplicado
+        % 3) Asignar selection al dataset duplicado
         try
             model.result.dataset(newDsetTag).selection.geom('geom1', 3);
-            model.result.dataset(newDsetTag).selection.named(fovTag);
+            model.result.dataset(newDsetTag).selection.named(selectedTag);
         catch errStage
-            error('Fallo al asignar selection FOV (%s) al dataset %s: %s', fovTag, newDsetTag, errStage.message);
+            error('Fallo al asignar selection (%s) al dataset %s: %s', selectedTag, newDsetTag, errStage.message);
         end
 
         % 4) PlotGroup3D + PNG (mismo flujo del script de referencia)
         try
             model.result.create(pg3dTag, 'PlotGroup3D');
+            if ~isempty(selectionLabel)
+                model.result(pg3dTag).label(selectionLabel);
+            end
         catch errStage
             error('Fallo al crear PlotGroup3D (%s): %s', pg3dTag, errStage.message);
         end
@@ -133,7 +160,7 @@ function export_dataset(model, datasetTag, txtPath, pngPath)
             model.result(pg1dTag).feature('hist1').set('evaluationsettings', 'parent');
             model.result(pg1dTag).feature('hist1').set('expr', 'mfnc.By');
             model.result(pg1dTag).feature('hist1').set('unit', 'mT');
-            model.result(pg1dTag).feature('hist1').set('number', 100);
+            model.result(pg1dTag).feature('hist1').set('number', histBins);
             model.result(pg1dTag).feature('hist1').set('function', 'discrete');
             model.result(pg1dTag).run;
 
@@ -186,6 +213,27 @@ function fovTag = find_fov_selection_tag(model)
             if isempty(fovTag)
                 fovTag = t;
             end
+        end
+    end
+end
+
+% -------------------------------------------------------------------------
+function tf = selection_exists_in_comp1(model, selectionTag)
+    tf = false;
+    if isempty(selectionTag)
+        return;
+    end
+
+    try
+        tags = model.component('comp1').selection.tags();
+    catch
+        tags = [];
+    end
+
+    for i = 1:numel(tags)
+        if strcmp(char(tags(i)), selectionTag)
+            tf = true;
+            return;
         end
     end
 end

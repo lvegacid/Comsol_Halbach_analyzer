@@ -38,50 +38,13 @@ function summary = extraction_controller(model, datasets, outputDir, modelName, 
             ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
             logFn('INFO', ts, ds.tag, sprintf('Carpeta de salida lista: %s', folderPath));
 
-            % Construir rutas de salida
-            safeName = make_safe_name(ds.shortLabel);
-            [histTxtPath, plot3dPngPath] = build_output_paths(folderPath, safeName, modelName);
-
-            doMainExports = logical(options.enable3DPlot) || logical(options.enableHistogram);
-
-            if doMainExports
-                % Flujo historico estable: export_dataset + postproceso Python
-                export_dataset(model, ds.tag, histTxtPath, plot3dPngPath);
-            end
-
-            if options.enableHistogram
-                analysisName = ds.shortLabel;
-                try
-                    run_bfov_python_postprocess(histTxtPath, modelName, fovInfo, analysisName);
-                    ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
-                    logFn('INFO', ts, ds.tag, 'Postproceso BFOV Python completado.');
-                catch postErr
-                    ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
-                    logFn('WARN', ts, ds.tag, ['Postproceso BFOV no ejecutado: ' compact_python_error(postErr.message)]);
-                    ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
-                    logFn('WARN', ts, ds.tag, ...
-                        'Instala dependencias Python (numpy, matplotlib). Ejemplo: python -m pip install numpy matplotlib');
+            if options.domainMode
+                for selIdx = 1:numel(options.domainSelections)
+                    selectedDomain = options.domainSelections(selIdx);
+                    run_bfov_exports(model, ds, folderPath, modelName, fovInfo, options, logFn, selectedDomain);
                 end
-            end
-
-            if options.enableCustomCoordinates
-                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
-                if isfield(options.coordConfig, 'source') && strcmpi(options.coordConfig.source, 'file')
-                    sourceFileName = '';
-                    if isfield(options.coordConfig, 'sourceFilePath') && ~isempty(options.coordConfig.sourceFilePath)
-                        [~, sourceFileName, ext] = fileparts(options.coordConfig.sourceFilePath);
-                        sourceFileName = [sourceFileName ext];
-                    end
-                    logFn('INFO', ts, ds.tag, sprintf(['Iniciando exportación B_FOV Custom Coordinates ' ...
-                        '(From file: %s | cols=%s)...'], sourceFileName, mat2str(options.coordConfig.coordColumns)));
-                else
-                    logFn('INFO', ts, ds.tag, sprintf(['Iniciando exportación B_FOV Custom Coordinates ' ...
-                        '(nTheta=%d, nPhi=%d, R=%.6f m)...'], ...
-                        options.coordConfig.nTheta, options.coordConfig.nPhi, options.coordConfig.R));
-                end
-                [coordTxtPath, coordPngPath] = export_custom_coordinates(model, ds.tag, folderPath, options.coordConfig);
-                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
-                logFn('INFO', ts, ds.tag, sprintf('B_FOV Custom Coordinates exportado: %s | %s', coordTxtPath, coordPngPath));
+            else
+                run_bfov_exports(model, ds, folderPath, modelName, fovInfo, options, logFn, []);
             end
 
             if options.enableMagnets3DPlot || options.enableMagnetsHistogram
@@ -121,6 +84,8 @@ function options = default_extraction_options()
     options.enableCustomCoordinates = false;
     options.enableMagnets3DPlot = false;
     options.enableMagnetsHistogram = false;
+    options.domainMode = false;
+    options.domainSelections = struct('tag', {}, 'label', {});
     options.histBins = 100;
     options.magnetsHistBins = 100;
     options.magnetsStepPercent = 2;
@@ -158,6 +123,92 @@ function options = normalize_extraction_options(options)
 
     if isfield(options.coordConfig, 'coordColumns')
         options.coordConfig.coordColumns = double(options.coordConfig.coordColumns(:).');
+    end
+end
+
+% -------------------------------------------------------------------------
+function run_bfov_exports(model, ds, folderPath, modelName, fovInfo, options, logFn, selectedDomain)
+    useDomainSelection = ~isempty(selectedDomain);
+
+    safeDatasetName = make_safe_name(ds.shortLabel);
+    [histTxtPath, plot3dPngPath] = build_output_paths(folderPath, safeDatasetName, modelName);
+    selectionTag = '';
+    selectionLabel = '';
+    titleText = '';
+    customCoordPrefix = '';
+    customLogPrefix = 'B_FOV';
+    fovInfoForPython = fovInfo;
+    analysisName = ds.shortLabel;
+
+    if useDomainSelection
+        selectionTag = selectedDomain.tag;
+        selectionLabel = selectedDomain.label;
+        titleText = selectionLabel;
+        safeSelectionLabel = make_safe_name(selectionLabel);
+        if isempty(safeSelectionLabel)
+            safeSelectionLabel = make_safe_name(selectionTag);
+        end
+
+        histTxtPath = fullfile(folderPath, sprintf('B_%s_Histogram_%s.txt', safeSelectionLabel, modelName));
+        plot3dPngPath = fullfile(folderPath, sprintf('B_%s_3DPlot_%s.png', safeSelectionLabel, modelName));
+        customCoordPrefix = sprintf('B_%s_CustomCoordinates_%s', safeSelectionLabel, modelName);
+        customLogPrefix = ['B_' selectionLabel];
+        fovInfoForPython = selectionLabel;
+        analysisName = selectionLabel;
+    end
+
+    doMainExports = logical(options.enable3DPlot) || logical(options.enableHistogram);
+    if doMainExports
+        % Flujo historico estable: export_dataset + postproceso Python
+        if useDomainSelection
+            export_dataset(model, ds.tag, histTxtPath, plot3dPngPath, selectionTag, titleText, options.histBins);
+        else
+            export_dataset(model, ds.tag, histTxtPath, plot3dPngPath);
+        end
+    end
+
+    if options.enableHistogram
+        try
+            run_bfov_python_postprocess(histTxtPath, modelName, fovInfoForPython, analysisName);
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            logFn('INFO', ts, ds.tag, 'Postproceso BFOV Python completado.');
+        catch postErr
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            logFn('WARN', ts, ds.tag, ['Postproceso BFOV no ejecutado: ' compact_python_error(postErr.message)]);
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            logFn('WARN', ts, ds.tag, ...
+                'Instala dependencias Python (numpy, matplotlib). Ejemplo: python -m pip install numpy matplotlib');
+        end
+    end
+
+    if options.enableCustomCoordinates
+        ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+        if isfield(options.coordConfig, 'source') && strcmpi(options.coordConfig.source, 'file')
+            sourceFileName = '';
+            if isfield(options.coordConfig, 'sourceFilePath') && ~isempty(options.coordConfig.sourceFilePath)
+                [~, sourceFileName, ext] = fileparts(options.coordConfig.sourceFilePath);
+                sourceFileName = [sourceFileName ext];
+            end
+            logFn('INFO', ts, ds.tag, sprintf(['Iniciando exportación %s Custom Coordinates ' ...
+                '(From file: %s | cols=%s)...'], customLogPrefix, sourceFileName, mat2str(options.coordConfig.coordColumns)));
+        else
+            logFn('INFO', ts, ds.tag, sprintf(['Iniciando exportación %s Custom Coordinates ' ...
+                '(nTheta=%d, nPhi=%d, R=%.6f m)...'], ...
+                customLogPrefix, options.coordConfig.nTheta, options.coordConfig.nPhi, options.coordConfig.R));
+        end
+
+        coordCfg = options.coordConfig;
+        if useDomainSelection
+            coordCfg.plotTitle = titleText;
+            coordCfg.outputBaseName = customCoordPrefix;
+            [coordTxtPath, coordPngPath] = export_custom_coordinates(model, ds.tag, folderPath, coordCfg, selectionTag);
+        else
+            [coordTxtPath, coordPngPath] = export_custom_coordinates(model, ds.tag, folderPath, coordCfg);
+        end
+
+        ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+        logFn('INFO', ts, ds.tag, sprintf('%s Custom Coordinates exportado: %s | %s', ...
+            customLogPrefix, coordTxtPath, coordPngPath));
     end
 end
 

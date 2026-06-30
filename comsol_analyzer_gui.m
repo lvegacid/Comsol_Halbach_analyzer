@@ -117,14 +117,19 @@ chkBfovCoord = uicheckbox(fig, ...
     'Position', [20 125 250 22], ...
     'Value', false);
 
+chkChangeDefaultFov = uicheckbox(fig, ...
+    'Text', 'Change default FOV', ...
+    'Position', [20 101 220 22], ...
+    'Value', false);
+
 chkMagnets3D = uicheckbox(fig, ...
     'Text', 'Magnets 3D Plot', ...
-    'Position', [20 101 220 22], ...
+    'Position', [20 77 220 22], ...
     'Value', false);
 
 chkMagnetsHist = uicheckbox(fig, ...
     'Text', 'Magnets Histogram', ...
-    'Position', [20 77 220 22], ...
+    'Position', [20 53 220 22], ...
     'Value', false);
 
 % --- Panel: Log ---
@@ -174,6 +179,7 @@ btnCopyLog.ButtonPushedFcn = @(~,~) copyLogCallback();
 chkBfov3D.ValueChangedFcn = @(~,~) updateRunButtonState();
 chkBfovHist.ValueChangedFcn = @(~,~) updateRunButtonState();
 chkBfovCoord.ValueChangedFcn = @(~,~) updateRunButtonState();
+chkChangeDefaultFov.ValueChangedFcn = @(~,~) updateRunButtonState();
 chkMagnets3D.ValueChangedFcn = @(~,~) updateRunButtonState();
 chkMagnetsHist.ValueChangedFcn = @(~,~) updateRunButtonState();
 
@@ -231,7 +237,8 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         chk3DY = runY - 32;
         chkHistY = chk3DY - 24;
         chkCoordY = chkHistY - 24;
-        chkMag3DY = chkCoordY - 24;
+        chkDomainY = chkCoordY - 24;
+        chkMag3DY = chkDomainY - 24;
         chkMagHistY = chkMag3DY - 24;
         logLabelY = chkMagHistY - 34;
         logH = max(minLogH, logLabelY - 3 - bottom);
@@ -258,6 +265,7 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         chkBfov3D.Position = [left chk3DY 220 22];
         chkBfovHist.Position = [left chkHistY 220 22];
         chkBfovCoord.Position = [left chkCoordY 250 22];
+        chkChangeDefaultFov.Position = [left chkDomainY 220 22];
         chkMagnets3D.Position = [left chkMag3DY 220 22];
         chkMagnetsHist.Position = [left chkMagHistY 220 22];
 
@@ -289,6 +297,11 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         hasDatasets = ~isempty(s.datasets);
         hasOutputOption = logical(chkBfov3D.Value) || logical(chkBfovHist.Value) || ...
             logical(chkBfovCoord.Value) || logical(chkMagnets3D.Value) || logical(chkMagnetsHist.Value);
+
+        % Cuando se activa "Change default FOV", las salidas se eligen en el dialogo modal.
+        if logical(chkChangeDefaultFov.Value)
+            hasOutputOption = true;
+        end
 
         if hasModel && hasDatasets && hasOutputOption
             btnRun.Enable = 'on';
@@ -687,6 +700,23 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         options.enableCustomCoordinates = logical(chkBfovCoord.Value);
         options.enableMagnets3DPlot = logical(chkMagnets3D.Value);
         options.enableMagnetsHistogram = logical(chkMagnetsHist.Value);
+        options.domainMode = false;
+        options.domainSelections = struct('tag', {}, 'label', {});
+
+        if logical(chkChangeDefaultFov.Value)
+            [okDomainCfg, domainCfg] = ask_domain_extraction_config(mdl);
+            if ~okDomainCfg
+                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                appendLog('INFO', ts, '', 'Extracción cancelada por el usuario (selección de dominios).');
+                return;
+            end
+
+            options.domainMode = true;
+            options.domainSelections = domainCfg.selections;
+            options.enable3DPlot = logical(domainCfg.enable3DPlot);
+            options.enableHistogram = logical(domainCfg.enableHistogram);
+            options.enableCustomCoordinates = logical(domainCfg.enableCustomCoordinates);
+        end
 
         if ~options.enable3DPlot && ~options.enableHistogram && ~options.enableCustomCoordinates && ...
            ~options.enableMagnets3DPlot && ~options.enableMagnetsHistogram
@@ -755,7 +785,12 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         % Ejecutar extracción
         try
             ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
-            appendLog('INFO', ts, '', sprintf('Iniciando extracción de %d dataset(s).', numel(selectedDatasets)));
+            if options.domainMode
+                appendLog('INFO', ts, '', sprintf('Iniciando extracción de %d dataset(s) en %d selección(es) de dominio.', ...
+                    numel(selectedDatasets), numel(options.domainSelections)));
+            else
+                appendLog('INFO', ts, '', sprintf('Iniciando extracción de %d dataset(s).', numel(selectedDatasets)));
+            end
             summary = extraction_controller(mdl, selectedDatasets, outputDir, ...
                                             modelName, logFn, progressFn, fovInfo, options);
         catch err
@@ -949,6 +984,153 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         bins = value;
         setpref('ComsolAnalyzer', 'HistogramBins', bins);
         ok = true;
+    end
+
+    function [ok, cfg] = ask_domain_extraction_config(model)
+        ok = false;
+        cfg = struct('selections', struct('tag', {}, 'label', {}), ...
+            'enable3DPlot', false, ...
+            'enableHistogram', false, ...
+            'enableCustomCoordinates', false);
+
+        selections = get_component1_selections(model);
+        if isempty(selections)
+            uialert(fig, ['No se encontraron selecciones en Component 1 > Definitions > Selections. ' ...
+                'No es posible ejecutar Change default FOV.'], 'Selections no encontradas');
+            return;
+        end
+
+        dlg = uifigure('Name', 'Change default FOV', ...
+            'Position', [300 170 520 470], ...
+            'WindowStyle', 'modal', ...
+            'Resize', 'off');
+        dlg.Tag = 'ComsolAnalyzerChildDialog';
+        registerChildDialog(dlg);
+
+        uilabel(dlg, 'Text', 'Selections (Component 1 > Definitions > Selections):', ...
+            'Position', [20 430 470 22], 'FontWeight', 'bold');
+
+        items = cell(numel(selections), 1);
+        itemData = cell(numel(selections), 1);
+        for idx = 1:numel(selections)
+            items{idx} = selections(idx).label;
+            itemData{idx} = selections(idx).tag;
+        end
+
+        selectionList = uilistbox(dlg, ...
+            'Position', [20 170 480 255], ...
+            'Items', items, ...
+            'ItemsData', itemData, ...
+            'MultiSelect', 'on', ...
+            'Value', {});
+
+        chkDomain3D = uicheckbox(dlg, ...
+            'Text', 'B_Domain 3D Plot', ...
+            'Position', [20 132 200 22], ...
+            'Value', true);
+        chkDomainHist = uicheckbox(dlg, ...
+            'Text', 'B_Domain Histogram', ...
+            'Position', [20 108 200 22], ...
+            'Value', true);
+        chkDomainCoord = uicheckbox(dlg, ...
+            'Text', 'B_Domain Custom Coordinates', ...
+            'Position', [20 84 250 22], ...
+            'Value', false);
+
+        btnRunDomain = uibutton(dlg, 'push', ...
+            'Text', 'Run', ...
+            'Position', [340 20 75 34], ...
+            'FontWeight', 'bold');
+        btnCancelDomain = uibutton(dlg, 'push', ...
+            'Text', 'Cancel', ...
+            'Position', [425 20 75 34]);
+
+        btnRunDomain.ButtonPushedFcn = @on_run;
+        btnCancelDomain.ButtonPushedFcn = @on_cancel;
+        dlg.CloseRequestFcn = @on_cancel;
+
+        uiwait(dlg);
+
+        function on_run(~, ~)
+            selectedTags = selectionList.Value;
+            if ischar(selectedTags)
+                selectedTags = {selectedTags};
+            end
+
+            if isempty(selectedTags)
+                uialert(dlg, 'Selecciona al menos una selection.', 'Selección requerida');
+                return;
+            end
+
+            if ~logical(chkDomain3D.Value) && ~logical(chkDomainHist.Value) && ~logical(chkDomainCoord.Value)
+                uialert(dlg, 'Selecciona al menos una salida de dominio.', 'Salida requerida');
+                return;
+            end
+
+            selectedStruct = struct('tag', {}, 'label', {});
+            for iSel = 1:numel(selectedTags)
+                selTag = selectedTags{iSel};
+                for jSel = 1:numel(selections)
+                    if strcmp(selections(jSel).tag, selTag)
+                        selectedStruct(end+1).tag = selections(jSel).tag; %#ok<AGROW>
+                        selectedStruct(end).label = selections(jSel).label;
+                        break;
+                    end
+                end
+            end
+
+            if isempty(selectedStruct)
+                uialert(dlg, 'No se pudieron resolver las selections elegidas.', 'Selección inválida');
+                return;
+            end
+
+            cfg.selections = selectedStruct;
+            cfg.enable3DPlot = logical(chkDomain3D.Value);
+            cfg.enableHistogram = logical(chkDomainHist.Value);
+            cfg.enableCustomCoordinates = logical(chkDomainCoord.Value);
+            ok = true;
+
+            if isvalid(dlg)
+                uiresume(dlg);
+                unregisterChildDialog(dlg);
+                delete(dlg);
+            end
+        end
+
+        function on_cancel(~, ~)
+            ok = false;
+            if isvalid(dlg)
+                uiresume(dlg);
+                unregisterChildDialog(dlg);
+                delete(dlg);
+            end
+        end
+    end
+
+    function selections = get_component1_selections(model)
+        selections = struct('tag', {}, 'label', {});
+
+        try
+            tags = model.component('comp1').selection.tags();
+        catch
+            tags = [];
+        end
+
+        for idx = 1:numel(tags)
+            selTag = char(tags(idx));
+            selLabel = '';
+            try
+                selLabel = strtrim(char(model.component('comp1').selection(selTag).label()));
+            catch
+            end
+
+            if isempty(selLabel)
+                selLabel = selTag;
+            end
+
+            selections(end+1).tag = selTag; %#ok<AGROW>
+            selections(end).label = selLabel;
+        end
     end
 
     function [ok, cfg] = ask_custom_coordinates_config()

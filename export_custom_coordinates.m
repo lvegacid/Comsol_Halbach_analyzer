@@ -1,4 +1,4 @@
-function [outputDataPath, outputPngPath] = export_custom_coordinates(model, datasetTag, outputDir, coordCfg)
+function [outputDataPath, outputPngPath] = export_custom_coordinates(model, datasetTag, outputDir, coordCfg, selectionTag)
 % export_custom_coordinates  Exporta B_FOV en coordenadas custom (esféricas).
 %
 % Entradas:
@@ -18,6 +18,12 @@ function [outputDataPath, outputPngPath] = export_custom_coordinates(model, data
     if nargin < 4 || ~isstruct(coordCfg)
         error('Se requiere coordCfg con model, nTheta, nPhi y R.');
     end
+    if nargin < 5
+        selectionTag = '';
+    end
+
+    workingDatasetTag = datasetTag;
+    tempDatasetTag = ['dset_coord_' regexprep(datasetTag, '[^a-zA-Z0-9_]', '_')];
 
     coordSource = 'spherical';
     if isfield(coordCfg, 'source') && ~isempty(coordCfg.source)
@@ -90,8 +96,19 @@ function [outputDataPath, outputPngPath] = export_custom_coordinates(model, data
     end
 
     coordFileName = ['Coordinates_' baseTag '.txt'];
-    dataFileName  = ['B_coordinates_' baseTag '.txt'];
-    pngFileName   = ['B_coordinates_' baseTag '.png'];
+
+    outputBaseName = '';
+    if isfield(coordCfg, 'outputBaseName') && ~isempty(coordCfg.outputBaseName)
+        outputBaseName = strtrim(char(coordCfg.outputBaseName));
+    end
+
+    if isempty(outputBaseName)
+        dataFileName  = ['B_coordinates_' baseTag '.txt'];
+        pngFileName   = ['B_coordinates_' baseTag '.png'];
+    else
+        dataFileName = [outputBaseName '.txt'];
+        pngFileName = [outputBaseName '.png'];
+    end
 
     outputDataPath = fullfile(outputDir, dataFileName);
     outputPngPath  = fullfile(outputDir, pngFileName);
@@ -105,8 +122,16 @@ function [outputDataPath, outputPngPath] = export_custom_coordinates(model, data
 
         try; model.result.export.remove(exportTag); catch; end
 
+        if ~isempty(selectionTag)
+            try; model.result.dataset.remove(tempDatasetTag); catch; end
+            model.result.dataset.duplicate(tempDatasetTag, datasetTag);
+            model.result.dataset(tempDatasetTag).selection.geom('geom1', 3);
+            model.result.dataset(tempDatasetTag).selection.named(selectionTag);
+            workingDatasetTag = tempDatasetTag;
+        end
+
         model.result.export.create(exportTag, 'Data');
-        model.result.export(exportTag).set('data', datasetTag);
+        model.result.export(exportTag).set('data', workingDatasetTag);
         model.result.export(exportTag).set('location', 'file');
         model.result.export(exportTag).set('coordfilename', coordFilePath);
         model.result.export(exportTag).set('expr', {'mfnc.Bx' 'mfnc.By' 'mfnc.Bz' 'mfnc.normB'});
@@ -118,11 +143,17 @@ function [outputDataPath, outputPngPath] = export_custom_coordinates(model, data
         if ~isFileSource
             validate_exported_coordinate_radius(tempDataPath, rMeters);
         end
-        create_custom_coordinates_png(tempDataPath, outputPngPath);
+        plotTitle = 'B_FOV Custom Coordinates';
+        if isfield(coordCfg, 'plotTitle') && ~isempty(coordCfg.plotTitle)
+            plotTitle = char(coordCfg.plotTitle);
+        end
+
+        create_custom_coordinates_png(tempDataPath, outputPngPath, plotTitle);
         move_file_overwrite(tempDataPath, outputDataPath);
 
     catch cause
         try; model.result.export.remove(exportTag); catch; end
+        try; model.result.dataset.remove(tempDatasetTag); catch; end
         try
             if exist(coordFilePath, 'file')
                 delete(coordFilePath);
@@ -141,6 +172,7 @@ function [outputDataPath, outputPngPath] = export_custom_coordinates(model, data
     end
 
     try; model.result.export.remove(exportTag); catch; end
+    try; model.result.dataset.remove(tempDatasetTag); catch; end
 
     % El archivo Coordinates_*.txt es temporal y se elimina al finalizar.
     try
@@ -216,7 +248,11 @@ function validate_exported_coordinate_radius(inputTxtPath, expectedRadiusMeters)
 end
 
 % -------------------------------------------------------------------------
-function create_custom_coordinates_png(inputTxtPath, outputPngPath)
+function create_custom_coordinates_png(inputTxtPath, outputPngPath, plotTitle)
+    if nargin < 3 || isempty(plotTitle)
+        plotTitle = 'B_FOV Custom Coordinates';
+    end
+
     data = readmatrix(inputTxtPath, 'FileType', 'text', 'CommentStyle', '%');
 
     if isempty(data) || size(data, 2) < 7
@@ -235,7 +271,7 @@ function create_custom_coordinates_png(inputTxtPath, outputPngPath)
     xlabel(ax, 'X [m]');
     ylabel(ax, 'Y [m]');
     zlabel(ax, 'Z [m]');
-    title(ax, 'B_FOV Custom Coordinates', 'Interpreter', 'none');
+    title(ax, plotTitle, 'Interpreter', 'none');
     colormap(ax, inferno_colormap(256));
     cb = colorbar(ax);
     cb.Label.String = 'By [mT]';
