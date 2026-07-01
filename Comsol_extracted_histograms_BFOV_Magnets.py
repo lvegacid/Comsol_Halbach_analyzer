@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import sys
 from datetime import datetime
@@ -47,6 +48,7 @@ def parse_args():
     parser.add_argument("--bfov-only", action="store_true", help="Solo ejecutar bloque BFOV")
     parser.add_argument("--magnets-only", action="store_true", help="Solo ejecutar bloque Magnets")
     parser.add_argument("--no-show", action="store_true", help="No abrir ventanas de plot")
+    parser.add_argument("--emit-metrics-json", dest="emit_metrics_json", help="Exporta métricas BFOV en JSON y termina")
     return parser.parse_args()
 
 
@@ -156,6 +158,27 @@ ppm_5   = (P95-P5)/B_avg*1e6
 BW_p2p_Hz = (B_to_kHz(B_max) - B_to_kHz(B_min)) * 1e3
 BW_1_Hz   = (B_to_kHz(P99) - B_to_kHz(P1)) * 1e3
 BW_5_Hz   = (B_to_kHz(P95) - B_to_kHz(P5)) * 1e3
+
+if args.emit_metrics_json:
+    payload = {
+        "P2P_ppm": float(ppm_p2p),
+        "B_min": float(B_min),
+        "B_max": float(B_max),
+        "B_avg": float(B_avg),
+        "ppm_1_99": float(ppm_1),
+        "P1": float(P1),
+        "P99": float(P99),
+        "ppm_5_95": float(ppm_5),
+        "P5": float(P5),
+        "P95": float(P95),
+        "Peak": float(B_peak),
+        "BW_p2p_Hz": float(BW_p2p_Hz),
+        "BW_1_99_Hz": float(BW_1_Hz),
+        "BW_5_95_Hz": float(BW_5_Hz),
+    }
+    with open(args.emit_metrics_json, "w", encoding="utf-8") as fp:
+        json.dump(payload, fp, indent=2)
+    sys.exit(0)
 
 # ============================================================
 # PLOT

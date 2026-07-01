@@ -36,6 +36,7 @@ function export_dataset(model, datasetTag, txtPath, pngPath, selectionTag, selec
     end
 
     newDsetTag   = ['dset_fov_' datasetTag];
+    dset3dTag    = ['dset_fov3d_' datasetTag];
     pg3dTag      = ['pg3d_' datasetTag];
     imgTag       = ['img_' datasetTag];
     plot3dTag    = ['plot3d_' datasetTag];
@@ -43,7 +44,7 @@ function export_dataset(model, datasetTag, txtPath, pngPath, selectionTag, selec
     plotHistTag  = ['plothist_' datasetTag];
 
     try
-        cleanup(model, newDsetTag, pg3dTag, imgTag, plot3dTag, pg1dTag, plotHistTag);
+        cleanup(model, newDsetTag, dset3dTag, pg3dTag, imgTag, plot3dTag, pg1dTag, plotHistTag);
 
         % Validar conexion del modelo antes de comenzar.
         assert_model_connected(model, 'inicio export_dataset');
@@ -85,8 +86,13 @@ function export_dataset(model, datasetTag, txtPath, pngPath, selectionTag, selec
             error('Fallo al asignar selection (%s) al dataset %s: %s', selectedTag, newDsetTag, errStage.message);
         end
 
-        % 4) PlotGroup3D + PNG (mismo flujo del script de referencia)
+        % 4) PlotGroup3D + PNG (usar dataset temporal dedicado para 3D)
         try
+            model.component("comp1").view("view1").hideObjects().clear();
+            model.result.dataset.duplicate(dset3dTag, datasetTag);
+            model.result.dataset(dset3dTag).selection.geom('geom1', 3);
+            model.result.dataset(dset3dTag).selection.named(selectedTag);
+
             model.result.create(pg3dTag, 'PlotGroup3D');
             if ~isempty(selectionLabel)
                 model.result(pg3dTag).label(selectionLabel);
@@ -103,13 +109,14 @@ function export_dataset(model, datasetTag, txtPath, pngPath, selectionTag, selec
         end
 
         try
-            model.result(pg3dTag).set('data', newDsetTag);
+            model.result(pg3dTag).set('data', dset3dTag);
             model.result(pg3dTag).create('vol1', 'Volume');
             model.result(pg3dTag).feature('vol1').set('evaluationsettings', 'parent');
             model.result(pg3dTag).feature('vol1').set('expr', 'mfnc.By');
             model.result(pg3dTag).feature('vol1').set('unit', 'mT');
             model.result(pg3dTag).feature('vol1').set('colortable', 'Inferno');
             model.result(pg3dTag).run;
+            model.component("comp1").view("view1").set("transparency", false);
         catch errStage
             error('Fallo al configurar/ejecutar PlotGroup3D %s: %s', pg3dTag, errStage.message);
         end
@@ -172,12 +179,12 @@ function export_dataset(model, datasetTag, txtPath, pngPath, selectionTag, selec
         end
 
     catch cause
-        cleanup(model, newDsetTag, pg3dTag, imgTag, plot3dTag, pg1dTag, plotHistTag);
+        cleanup(model, newDsetTag, dset3dTag, pg3dTag, imgTag, plot3dTag, pg1dTag, plotHistTag);
         throw(MException('ComsolAnalyzer:exportDataset', ...
             'Error exportando dataset "%s": %s', datasetTag, cause.message));
     end
 
-    cleanup(model, newDsetTag, pg3dTag, imgTag, plot3dTag, pg1dTag, plotHistTag);
+    cleanup(model, newDsetTag, dset3dTag, pg3dTag, imgTag, plot3dTag, pg1dTag, plotHistTag);
 end
 
 % -------------------------------------------------------------------------
@@ -332,7 +339,7 @@ function export_png_with_strategies(model, pg3dTag, imgTag, pngOutPath)
         model.result.export(imgTag).set('resolution', '96');
         model.result.export(imgTag).set('antialias', 'on');
         model.result.export(imgTag).set('zoomextents', 'off');
-        model.result.export(imgTag).set('fontsize', '9');
+        model.result.export(imgTag).set('fontsize', '12');
         model.result.export(imgTag).set('colortheme', 'globaltheme');
         model.result.export(imgTag).set('customcolor', [1 1 1]);
         model.result.export(imgTag).set('background', 'color');
@@ -348,7 +355,7 @@ function export_png_with_strategies(model, pg3dTag, imgTag, pngOutPath)
         model.result.export(imgTag).set('title3d', 'on');
         model.result.export(imgTag).set('legend3d', 'on');
         model.result.export(imgTag).set('logo3d', 'on');
-        model.result.export(imgTag).set('options3d', 'off');
+        model.result.export(imgTag).set('options3d', 'on');
         model.result.export(imgTag).set('axisorientation', 'on');
         model.result.export(imgTag).set('grid', 'on');
         model.result.export(imgTag).set('axes1d', 'on');
@@ -398,6 +405,7 @@ function export_png_via_mphplot(model, pg3dTag, pngOutPath)
         catch
         end
 
+        apply_export_axes_style(fig);
         ensure_color_scale_visible(fig);
         drawnow;
         try
@@ -442,6 +450,36 @@ function ensure_color_scale_visible(fig)
         try
             colorbar(ax(i));
             return;
+        catch
+        end
+    end
+end
+
+% -------------------------------------------------------------------------
+function apply_export_axes_style(fig)
+    if isempty(fig) || ~isvalid(fig)
+        return;
+    end
+
+    ax = findall(fig, 'Type', 'Axes');
+    if isempty(ax)
+        return;
+    end
+
+    for i = 1:numel(ax)
+        try
+            grid(ax(i), 'on');
+        catch
+        end
+        try
+            ax(i).XGrid = 'on';
+            ax(i).YGrid = 'on';
+            ax(i).ZGrid = 'on';
+        catch
+        end
+        try
+            ax(i).Visible = 'on';
+            box(ax(i), 'on');
         catch
         end
     end
@@ -505,11 +543,12 @@ function str = list_result_datasets(model)
 end
 
 % -------------------------------------------------------------------------
-function cleanup(model, newDsetTag, pg3dTag, imgTag, plot3dTag, pg1dTag, plotHistTag)
+function cleanup(model, newDsetTag, dset3dTag, pg3dTag, imgTag, plot3dTag, pg1dTag, plotHistTag)
     try; model.result.export.remove(plotHistTag); catch; end
     try; model.result.export.remove(plot3dTag);   catch; end
     try; model.result.export.remove(imgTag);      catch; end
     try; model.result.remove(pg1dTag);            catch; end
     try; model.result.remove(pg3dTag);            catch; end
+    try; model.result.dataset.remove(dset3dTag);  catch; end
     try; model.result.dataset.remove(newDsetTag); catch; end
 end
