@@ -94,7 +94,13 @@ datasetList = uilistbox(fig, ...
     'Items', {}, ...
     'MultiSelect', 'on');
 
-% --- Botón Run ---
+% --- Botones principales ---
+btnRunGeometry = uibutton(fig, 'push', ...
+    'Text', 'Extract Geometry Plots', ...
+    'Position', [180 205 170 30], ...
+    'Enable', 'on', ...
+    'FontWeight', 'bold');
+
 btnRun = uibutton(fig, 'push', ...
     'Text', 'Run Extraction', ...
     'Position', [20 205 150 30], ...
@@ -169,6 +175,7 @@ btnBrowseOut.ButtonPushedFcn = @(~,~) browseOutputCallback();
 % Task 8.8 — Callback "Run Extraction"
 % -------------------------------------------------------------------------
 btnRun.ButtonPushedFcn = @(~,~) runExtractionCallback();
+btnRunGeometry.ButtonPushedFcn = @(~,~) runGeometryPlotsCallback();
 
 % -------------------------------------------------------------------------
 % Callback "Copy Log"
@@ -262,6 +269,7 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         datasetList.Position = [left datasetY wideW datasetH];
 
         btnRun.Position = [left runY 150 30];
+        btnRunGeometry.Position = [left + 160 runY 170 30];
         chkBfov3D.Position = [left chk3DY 220 22];
         chkBfovHist.Position = [left chkHistY 220 22];
         chkBfovCoord.Position = [left chkCoordY 250 22];
@@ -791,6 +799,7 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
             else
                 appendLog('INFO', ts, '', sprintf('Iniciando extracción de %d dataset(s).', numel(selectedDatasets)));
             end
+
             summary = extraction_controller(mdl, selectedDatasets, outputDir, ...
                                             modelName, logFn, progressFn, fovInfo, options);
         catch err
@@ -814,6 +823,88 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
 
         % Rehabilitar Run
         updateRunButtonState();
+    end
+
+    function runGeometryPlotsCallback()
+        if isFigureClosing()
+            return;
+        end
+
+        status = refreshConnectionStatus('status', false);
+        if ~status.connected
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('WARN', ts, '', ...
+                'LiveLink no esta conectado. Verifica COMSOL with MATLAB y vuelve a intentar.');
+            updateRunButtonState();
+            return;
+        end
+
+        outputDir = strtrim(outputField.Value);
+        if isempty(outputDir)
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('WARN', ts, '', ...
+                'Debe especificar un directorio de salida.');
+            return;
+        end
+
+        if isfolder(outputDir)
+            setpref(prefGroup, 'LastOutputDir', outputDir);
+            lastOutputDir = outputDir;
+        end
+
+        s = fig.UserData;
+        mdl = s.model;
+
+        if isempty(mdl)
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('WARN', ts, '', 'No hay modelo cargado.');
+            return;
+        end
+
+        mphPath = strtrim(mphField.Value);
+        [~, modelName, ~] = fileparts(mphPath);
+
+        [canWriteOutput, outputMessage] = validate_output_directory(outputDir, modelName);
+        if ~canWriteOutput
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('ERROR', ts, '', outputMessage);
+            appendLog('WARN', ts, '', ...
+                'Selecciona una carpeta local con permisos de escritura y vuelve a ejecutar.');
+            return;
+        end
+
+        [okGeomCfg, geomCfg] = ask_geometry_hide_config(mdl);
+        if ~okGeomCfg
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('INFO', ts, '', 'Extracción de geometría cancelada por el usuario.');
+            return;
+        end
+
+        startedAt = tic;
+        heartbeatTimer = startExtractionHeartbeat();
+        drawnow;
+
+        try
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('INFO', ts, '', 'Iniciando export de Geometry plots.');
+            appendLog('INFO', ts, '', 'Progreso: 1 / 1 tareas procesadas.');
+
+            simulationRoot = fullfile(outputDir, 'Simulation_results');
+            export_geometry_plots(mdl, simulationRoot, geomCfg.hideSelections);
+
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('INFO', ts, '', '--- Resumen Geometry plots ---');
+            appendLog('INFO', ts, '', sprintf('  Directorio:     %s', simulationRoot));
+            appendLog('INFO', ts, '', sprintf('  Tiempo total:   %s', formatElapsedTime(toc(startedAt))));
+        catch err
+            stopExtractionHeartbeat(heartbeatTimer);
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('ERROR', ts, '', ...
+                sprintf('Error inesperado en export_geometry_plots: %s', err.message));
+            return;
+        end
+
+        stopExtractionHeartbeat(heartbeatTimer);
     end
 
     function heartbeatTimer = startExtractionHeartbeat()
@@ -1090,6 +1181,92 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
             cfg.enableCustomCoordinates = logical(chkDomainCoord.Value);
             ok = true;
 
+            if isvalid(dlg)
+                uiresume(dlg);
+                unregisterChildDialog(dlg);
+                delete(dlg);
+            end
+        end
+
+        function on_cancel(~, ~)
+            ok = false;
+            if isvalid(dlg)
+                uiresume(dlg);
+                unregisterChildDialog(dlg);
+                delete(dlg);
+            end
+        end
+    end
+
+    function [ok, cfg] = ask_geometry_hide_config(model)
+        ok = false;
+        cfg = struct('hideSelections', struct('tag', {}, 'label', {}));
+
+        selections = get_component1_selections(model);
+        if isempty(selections)
+            uialert(fig, ['No se encontraron selecciones en Component 1 > Definitions > Selections. ' ...
+                'No es posible ejecutar Extract Geometry Plots.'], 'Selections no encontradas');
+            return;
+        end
+
+        dlg = uifigure('Name', 'Extract Geometry Plots', ...
+            'Position', [320 190 500 420], ...
+            'WindowStyle', 'modal', ...
+            'Resize', 'off');
+        dlg.Tag = 'ComsolAnalyzerChildDialog';
+        registerChildDialog(dlg);
+
+        uilabel(dlg, 'Text', 'Domains to hide (Definitions > Selections):', ...
+            'Position', [20 380 450 22], 'FontWeight', 'bold');
+
+        items = cell(numel(selections), 1);
+        itemData = cell(numel(selections), 1);
+        for idx = 1:numel(selections)
+            items{idx} = selections(idx).label;
+            itemData{idx} = selections(idx).tag;
+        end
+
+        selectionList = uilistbox(dlg, ...
+            'Position', [20 80 460 290], ...
+            'Items', items, ...
+            'ItemsData', itemData, ...
+            'MultiSelect', 'on', ...
+            'Value', {});
+
+        btnRunGeom = uibutton(dlg, 'push', ...
+            'Text', 'Run', ...
+            'Position', [320 20 75 34], ...
+            'FontWeight', 'bold');
+        btnCancelGeom = uibutton(dlg, 'push', ...
+            'Text', 'Cancel', ...
+            'Position', [405 20 75 34]);
+
+        btnRunGeom.ButtonPushedFcn = @on_run;
+        btnCancelGeom.ButtonPushedFcn = @on_cancel;
+        dlg.CloseRequestFcn = @on_cancel;
+
+        uiwait(dlg);
+
+        function on_run(~, ~)
+            selectedTags = selectionList.Value;
+            if ischar(selectedTags)
+                selectedTags = {selectedTags};
+            end
+
+            selectedStruct = struct('tag', {}, 'label', {});
+            for iSel = 1:numel(selectedTags)
+                selTag = selectedTags{iSel};
+                for jSel = 1:numel(selections)
+                    if strcmp(selections(jSel).tag, selTag)
+                        selectedStruct(end+1).tag = selections(jSel).tag; %#ok<AGROW>
+                        selectedStruct(end).label = selections(jSel).label;
+                        break;
+                    end
+                end
+            end
+
+            cfg.hideSelections = selectedStruct;
+            ok = true;
             if isvalid(dlg)
                 uiresume(dlg);
                 unregisterChildDialog(dlg);

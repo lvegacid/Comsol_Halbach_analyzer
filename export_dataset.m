@@ -142,6 +142,12 @@ function export_dataset(model, datasetTag, txtPath, pngPath, selectionTag, selec
             catch
             end
             move_file_overwrite(pngTempPath, pngPath);
+
+            % Extiende con vistas ortograficas sin alterar el flujo 3D existente.
+            try
+                export_orthographic_views(model, pg3dTag, imgTag, pngPath, datasetTag);
+            catch
+            end
         catch errStage
             error('Fallo al exportar PNG (%s): %s', pngPath, errStage.message);
         end
@@ -322,6 +328,121 @@ function move_file_overwrite(srcPath, dstPath)
     [ok, msg] = movefile(srcPath, dstPath, 'f');
     if ~ok
         error('No se pudo mover PNG temporal a destino final: %s', msg);
+    end
+end
+
+% -------------------------------------------------------------------------
+function export_orthographic_views(model, pg3dTag, imgTag, mainPngPath, datasetTag)
+    [xyPath, yzPath, xzPath] = derive_orthographic_png_paths(mainPngPath);
+
+    ensure_parent_dir_exists(xyPath);
+    ensure_parent_dir_exists(yzPath);
+    ensure_parent_dir_exists(xzPath);
+
+    ensure_view2_exists(model);
+
+    % Forzar que el PlotGroup3D use la misma vista de camara que ajustamos.
+    try; model.result(pg3dTag).set('view', 'view2'); catch; end
+
+    try; model.result.export.remove(imgTag); catch; end
+    model.result.export.create(imgTag, pg3dTag, 'Image');
+    model.result.export(imgTag).set('size', 'current');
+    model.result.export(imgTag).set('unit', 'px');
+    model.result.export(imgTag).set('height', '600');
+    model.result.export(imgTag).set('width', '800');
+    model.result.export(imgTag).set('lockratio', 'off');
+    model.result.export(imgTag).set('resolution', '96');
+    model.result.export(imgTag).set('antialias', 'on');
+    model.result.export(imgTag).set('zoomextents', 'off');
+    model.result.export(imgTag).set('fontsize', '12');
+    model.result.export(imgTag).set('colortheme', 'globaltheme');
+    model.result.export(imgTag).set('customcolor', [1 1 1]);
+    model.result.export(imgTag).set('background', 'color');
+    model.result.export(imgTag).set('gltfincludelines', 'on');
+    model.result.export(imgTag).set('title1d', 'on');
+    model.result.export(imgTag).set('legend1d', 'on');
+    model.result.export(imgTag).set('logo1d', 'on');
+    model.result.export(imgTag).set('options1d', 'on');
+    model.result.export(imgTag).set('title2d', 'on');
+    model.result.export(imgTag).set('legend2d', 'on');
+    model.result.export(imgTag).set('logo2d', 'on');
+    model.result.export(imgTag).set('options2d', 'off');
+    model.result.export(imgTag).set('title3d', 'on');
+    model.result.export(imgTag).set('legend3d', 'on');
+    model.result.export(imgTag).set('logo3d', 'on');
+    model.result.export(imgTag).set('options3d', 'on');
+    model.result.export(imgTag).set('axisorientation', 'on');
+    model.result.export(imgTag).set('grid', 'on');
+    model.result.export(imgTag).set('axes1d', 'on');
+    model.result.export(imgTag).set('axes2d', 'on');
+    model.result.export(imgTag).set('showgrid', 'on');
+    model.result.export(imgTag).set('target', 'file');
+    model.result.export(imgTag).set('qualitylevel', '92');
+    model.result.export(imgTag).set('qualityactive', 'off');
+    model.result.export(imgTag).set('imagetype', 'png');
+    model.result.export(imgTag).set('lockview', 'on');
+    model.result.export(imgTag).set('highprecisioncolor', 'off');
+    try; model.result.export(imgTag).set('view', 'view2'); catch; end
+
+    % XY view
+    model.component("comp1").view("view2").camera().set("projection", "orthographic");
+    model.component("comp1").view("view2").camera().set("up", [0, 1, 0]);
+    model.component("comp1").view("view2").camera().set("position", [0, 0, 1]);
+    model.component("comp1").view("view2").camera().set("orthoscale", 0.2);
+    try; model.result(pg3dTag).run; catch; end
+    export_orthographic_png_with_existing_export(model, imgTag, xyPath, [datasetTag '_xy']);
+
+    % YZ view
+    model.component("comp1").view("view2").camera().set("projection", "orthographic");
+    model.component("comp1").view("view2").camera().set("position", [1, 0, 0]);
+    model.component("comp1").view("view2").camera().set("up", [0, 0, 1]);
+    model.component("comp1").view("view2").camera().set("orthoscale", 0.2);
+    try; model.result(pg3dTag).run; catch; end
+    export_orthographic_png_with_existing_export(model, imgTag, yzPath, [datasetTag '_yz']);
+
+    % XZ view
+    model.component("comp1").view("view2").camera().set("projection", "orthographic");
+    model.component("comp1").view("view2").camera().set("position", [0, 1, 0]);
+    model.component("comp1").view("view2").camera().set("up", [0, 1, 0]);
+    model.component("comp1").view("view2").camera().set("orthoscale", 0.2);
+    try; model.result(pg3dTag).run; catch; end
+    export_orthographic_png_with_existing_export(model, imgTag, xzPath, [datasetTag '_xz']);
+
+    try; model.result.export.remove(imgTag); catch; end
+end
+
+% -------------------------------------------------------------------------
+function export_orthographic_png_with_existing_export(model, imgTag, finalPath, tempTag)
+    pngTempPath = build_temp_export_path('png', tempTag);
+    model.result.export(imgTag).set('pngfilename', pngTempPath);
+    model.result.export(imgTag).run;
+    move_file_overwrite(pngTempPath, finalPath);
+end
+
+% -------------------------------------------------------------------------
+function [xyPath, yzPath, xzPath] = derive_orthographic_png_paths(mainPngPath)
+    [folder, name, ext] = fileparts(mainPngPath);
+
+    baseName = regexprep(name, '_3DPlot$', '');
+    if strcmp(baseName, name)
+        baseName = regexprep(name, '3DPlot$', '');
+    end
+
+    if strcmp(baseName, name)
+        baseName = name;
+    end
+
+    xyPath = fullfile(folder, [baseName '_XY' ext]);
+    yzPath = fullfile(folder, [baseName '_YZ' ext]);
+    xzPath = fullfile(folder, [baseName '_XZ' ext]);
+end
+
+% -------------------------------------------------------------------------
+function ensure_view2_exists(model)
+    try
+        model.component('comp1').view('view2');
+    catch
+        model.component('comp1').view().create('view2', 'geom1');
     end
 end
 

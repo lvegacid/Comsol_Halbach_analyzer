@@ -96,6 +96,7 @@ class ReportPayload:
     summary_parameters: list[str] = field(default_factory=list)
     report_comment: str = ""
     label_comments: dict[str, str] = field(default_factory=dict)
+    label_expected_ppms: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

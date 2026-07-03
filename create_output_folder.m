@@ -2,7 +2,7 @@ function folderPath = create_output_folder(outputDir, modelName, datasetLabel, d
 % create_output_folder  Create the output folder structure for a dataset.
 %
 % Creates the directory tree:
-%   <outputDir>/<safe(modelName)>/<safe(datasetLabel)>/
+%   <outputDir>/Simulation_results/<safe(datasetLabel)>/
 %
 % If mkdir fails with the dataset label, retries using the dataset tag.
 % If both attempts fail, throws an MException.
@@ -25,11 +25,17 @@ function folderPath = create_output_folder(outputDir, modelName, datasetLabel, d
 %
 % Validates: Requisitos 3.1, 3.3
 
-    safeModel = make_safe_name(modelName);
+    simulationRoot = fullfile(outputDir, 'Simulation_results');
+    [rootOk, rootMsg] = mkdir(simulationRoot);
+    if ~rootOk
+        throw(MException('ComsolAnalyzer:createFolder', ...
+            'Could not create Simulation_results root: %s (%s).', simulationRoot, rootMsg));
+    end
+
     safeLabel = make_safe_name(datasetLabel);
 
     % First attempt: use the dataset label
-    folderPath = fullfile(outputDir, safeModel, safeLabel);
+    folderPath = fullfile(simulationRoot, safeLabel);
     [ok, msg] = mkdir(folderPath);
     if ok
         return;
@@ -37,7 +43,7 @@ function folderPath = create_output_folder(outputDir, modelName, datasetLabel, d
 
     % Second attempt: fall back to the dataset tag
     safeTag = make_safe_name(datasetTag);
-    folderPath = fullfile(outputDir, safeModel, safeTag);
+    folderPath = fullfile(simulationRoot, safeTag);
     [ok, msg2] = mkdir(folderPath);
     if ok
         return;
@@ -47,6 +53,6 @@ function folderPath = create_output_folder(outputDir, modelName, datasetLabel, d
     throw(MException('ComsolAnalyzer:createFolder', ...
         ['Could not create output folder. Label path: %s (%s). ' ...
          'Tag path: %s (%s).'], ...
-        fullfile(outputDir, safeModel, safeLabel), msg, ...
-        fullfile(outputDir, safeModel, safeTag), msg2));
+        fullfile(simulationRoot, safeLabel), msg, ...
+        fullfile(simulationRoot, safeTag), msg2));
 end

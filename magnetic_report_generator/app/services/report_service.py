@@ -65,12 +65,16 @@ class ReportService:
             self._append_magnet_data(story, payload.magnet_metrics, geometry_images)
             story.append(Spacer(1, 0.25 * cm))
 
+        self._append_bh_curves(story, payload.studies)
+        story.append(PageBreak())
+
         self._append_bfield_results(
             story,
             payload.studies,
             payload.summary_labels,
             payload.summary_parameters,
             payload.label_comments,
+            payload.label_expected_ppms,
         )
         story.append(PageBreak())
 
@@ -121,8 +125,7 @@ class ReportService:
             self._append_attached_images(story, metrics.other_info_images)
             story.append(Spacer(1, 0.15 * cm))
 
-        for image_path in geometry_images:
-            self._append_single_image_with_caption(story, image_path, None, 16.5 * cm, 8.2 * cm)
+        self._append_geometry_images_row(story, geometry_images)
 
         story.append(Paragraph("Rings", self.h2))
         ring_rows = [["Ring", "X position (mm)", "Magnets"]]
@@ -145,21 +148,26 @@ class ReportService:
         story.append(self._anchored_heading("index", "Index", self.h1))
         entries: list[tuple[int, str, str]] = [
             (0, "1. Magnet data", "magnet-data"),
-            (0, "2. Simulation B_field results", "simulation-bfield-results"),
+            (0, "2. BH curves", "bh-curves"),
+            (0, "3. Simulation B_field results", "simulation-bfield-results"),
         ]
+
+        for study_index, study in enumerate(payload.studies, start=1):
+            study_anchor = self._bh_study_anchor(study.folder_name)
+            entries.append((1, f"2.{study_index} {study.folder_name}", study_anchor))
 
         summary_labels = self._selected_summary_labels(payload)
         for label_index, label in enumerate(summary_labels, start=1):
             label_anchor = self._label_anchor(label)
-            entries.append((1, f"2.{label_index} {label}", label_anchor))
-            entries.append((2, f"2.{label_index}.1 Table summary", f"{label_anchor}-table"))
-            entries.append((2, f"2.{label_index}.2 Plots", f"{label_anchor}-plots"))
+            entries.append((1, f"3.{label_index} {label}", label_anchor))
+            entries.append((2, f"3.{label_index}.1 Table summary", f"{label_anchor}-table"))
+            entries.append((2, f"3.{label_index}.2 Plots", f"{label_anchor}-plots"))
 
-        entries.append((0, "3. Simulation Magnet results", "simulation-magnet-results"))
+        entries.append((0, "4. Simulation Magnet results", "simulation-magnet-results"))
         for study_index, study in enumerate(payload.studies, start=1):
             study_anchor = self._study_anchor(study.folder_name)
-            entries.append((1, f"3.{study_index} {study.folder_name}", study_anchor))
-            entries.append((2, f"3.{study_index}.1 Plots", f"{study_anchor}-plots"))
+            entries.append((1, f"4.{study_index} {study.folder_name}", study_anchor))
+            entries.append((2, f"4.{study_index}.1 Plots", f"{study_anchor}-plots"))
 
         for indent, entry, anchor in entries:
             spacer = "&nbsp;" * (indent * 6)
@@ -172,6 +180,7 @@ class ReportService:
         selected_labels: list[str],
         selected_parameters: list[str],
         label_comments: dict[str, str],
+        label_expected_ppms: dict[str, str],
     ) -> None:
         story.append(self._anchored_heading("simulation-bfield-results", "Simulation B_field results", self.h1))
         parent_path = self._common_parent_path(studies)
@@ -189,6 +198,9 @@ class ReportService:
             comment = label_comments.get(label, "").strip()
             if comment:
                 story.append(Paragraph(f'Details: "{escape(comment)}"', self.cell))
+            expected_ppm = label_expected_ppms.get(label, "").strip()
+            if expected_ppm:
+                story.append(Paragraph(f'Expected ppms: {escape(expected_ppm)}', self.cell))
             story.append(self._anchored_heading(f"{self._label_anchor(label)}-table", "Table summary", self.h3))
             table = self._build_summary_table_for_label(studies, label, selected_parameters)
             story.append(table)
@@ -198,9 +210,30 @@ class ReportService:
     def _append_magnet_results(self, story: list, studies: list[SimulationStudyResult]) -> None:
         story.append(self._anchored_heading("simulation-magnet-results", "Simulation Magnet results", self.h1))
         for study in studies:
-            story.append(self._anchored_heading(self._study_anchor(study.folder_name), study.folder_name, self.h2))
-            story.append(self._anchored_heading(f"{self._study_anchor(study.folder_name)}-plots", "Plots", self.h3))
+            study_anchor = self._magnet_study_anchor(study.folder_name)
+            story.append(self._anchored_heading(study_anchor, study.folder_name, self.h2))
+            story.append(self._anchored_heading(f"{study_anchor}-plots", "Plots", self.h3))
             self._append_magnet_only_plots(story, study)
+
+    def _append_bh_curves(self, story: list, studies: list[SimulationStudyResult]) -> None:
+        story.append(self._anchored_heading("bh-curves", "BH curves", self.h1))
+
+        if not studies:
+            story.append(Paragraph("No simulation studies selected.", self.normal))
+            return
+
+        for study in studies:
+            story.append(self._anchored_heading(self._bh_study_anchor(study.folder_name), study.folder_name, self.h2))
+
+            material = study.material_curve
+            material_name = material.name if material is not None and material.name else study.material_name
+            if material_name:
+                story.append(Paragraph(f"Material used: {escape(material_name)}", self.cell))
+            else:
+                story.append(Paragraph("Material used: N/A", self.cell))
+
+            self._append_material_details(story, material, heading="BH curve")
+            story.append(Spacer(1, 0.1 * cm))
 
     def _build_summary_table_for_label(
         self,
@@ -379,14 +412,90 @@ class ReportService:
     def _find_geometry_images(self, studies: list[SimulationStudyResult]) -> list[Path]:
         geometry: list[Path] = []
         seen: set[Path] = set()
+        roots_seen: set[Path] = set()
+
         for study in studies:
-            candidate = Path(study.folder_path).parent / "Geometry.png"
-            if candidate.exists():
-                resolved = candidate.resolve()
-                if resolved not in seen:
-                    seen.add(resolved)
-                    geometry.append(candidate)
+            study_path = Path(study.folder_path)
+            parent = study_path.parent
+            candidates = [parent]
+            if parent.name.lower() != "simulation_results":
+                candidates.append(parent / "Simulation_results")
+
+            simulation_root = next((candidate for candidate in candidates if candidate.exists() and candidate.is_dir() and candidate.name.lower() == "simulation_results"), None)
+            if simulation_root is None:
+                continue
+
+            try:
+                resolved_root = simulation_root.resolve()
+            except Exception:
+                resolved_root = simulation_root
+
+            if resolved_root in roots_seen:
+                continue
+            roots_seen.add(resolved_root)
+
+            for png_path in simulation_root.glob("*.png"):
+                if not png_path.name.lower().startswith("geometry"):
+                    continue
+                try:
+                    resolved = png_path.resolve()
+                except Exception:
+                    resolved = png_path
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                geometry.append(png_path)
+
+        def order_key(path: Path) -> tuple[int, str]:
+            name = path.name.lower()
+            if name == "geometry_3d.png":
+                return (0, name)
+            if name == "geometry_xy.png":
+                return (1, name)
+            if name == "geometry_yz.png":
+                return (2, name)
+            return (3, name)
+
+        geometry.sort(key=order_key)
         return geometry
+
+    def _append_geometry_images_row(self, story: list, geometry_images: list[Path]) -> None:
+        if not geometry_images:
+            return
+
+        normalized: list[Path] = []
+        for image_path in geometry_images:
+            normalized_path = self._prepare_image_for_pdf(image_path)
+            if normalized_path is not None:
+                normalized.append(normalized_path)
+
+        if not normalized:
+            return
+
+        total_width = 16.2 * cm
+        count = len(normalized)
+        col_width = total_width / count
+        cells = []
+        for image_path in normalized:
+            img = Image(str(image_path))
+            img._restrictSize(max(1.0 * cm, col_width - 0.15 * cm), 6.4 * cm)
+            cells.append(img)
+
+        table = Table([cells], colWidths=[col_width] * count)
+        table.setStyle(
+            TableStyle(
+                [
+                    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                    ("TOPPADDING", (0, 0), (-1, -1), 0),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                ]
+            )
+        )
+        story.append(table)
+        story.append(Spacer(1, 0.15 * cm))
 
     def _append_single_image_with_caption(
         self,
@@ -462,12 +571,12 @@ class ReportService:
             story.append(table)
             story.append(Spacer(1, 0.15 * cm))
 
-    def _append_material_details(self, story: list, material: MaterialCurve | None) -> None:
+    def _append_material_details(self, story: list, material: MaterialCurve | None, heading: str = "Material details") -> None:
         if material is None:
             return
 
         story.append(Spacer(1, 0.12 * cm))
-        story.append(Paragraph("Material details", self.h3))
+        story.append(Paragraph(heading, self.h3))
 
         if material.comment:
             story.append(Paragraph(f"Comment: {escape(material.comment)}", self.cell))
@@ -503,6 +612,14 @@ class ReportService:
     @staticmethod
     def _study_anchor(folder_name: str) -> str:
         return f"study-{folder_name.lower().replace(' ', '-')}"
+
+    @staticmethod
+    def _bh_study_anchor(folder_name: str) -> str:
+        return f"bh-study-{folder_name.lower().replace(' ', '-')}"
+
+    @staticmethod
+    def _magnet_study_anchor(folder_name: str) -> str:
+        return f"magnet-study-{folder_name.lower().replace(' ', '-')}"
 
     @staticmethod
     def _label_anchor(label: str) -> str:

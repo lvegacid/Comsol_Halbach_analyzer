@@ -131,6 +131,7 @@ class MainWindow(QMainWindow):
                 summary_parameters=selected_parameters,
                 report_comment="",
                 label_comments=self.tab_generate.selected_label_comments(),
+                label_expected_ppms=self.tab_generate.selected_label_expected_ppms(),
             )
             self._report_service.generate_pdf(payload)
             self._study_results = studies

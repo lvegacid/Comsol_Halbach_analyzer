@@ -15,15 +15,10 @@ function [ok, message] = validate_output_directory(outputDir, modelName)
         return;
     end
 
-    safeModel = make_safe_name(modelName);
-    if isempty(safeModel)
-        safeModel = 'comsol_output';
-    end
-
-    probeDir = fullfile(outputDir, safeModel);
+    probeDir = fullfile(outputDir, 'Simulation_results');
     [mkOk, mkMsg] = mkdir(probeDir);
     if ~mkOk
-        message = ['No se puede crear o acceder a la carpeta del modelo en el destino: ' ...
+        message = ['No se puede crear o acceder a la carpeta Simulation_results en el destino: ' ...
             probeDir ' (' mkMsg ').'];
         return;
     end

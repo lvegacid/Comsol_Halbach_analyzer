@@ -55,8 +55,8 @@ class GenerateTab(QWidget):
 
         labels_box = QGroupBox("Summary Labels")
         labels_root = QVBoxLayout(labels_box)
-        self.labels_table = QTableWidget(0, 3)
-        self.labels_table.setHorizontalHeaderLabels(["Use", "Label", "Comment"])
+        self.labels_table = QTableWidget(0, 4)
+        self.labels_table.setHorizontalHeaderLabels(["Use", "Label", "Comment", "Expected ppms"])
         self.labels_table.horizontalHeader().setStretchLastSection(True)
         labels_root.addWidget(self.labels_table)
         root.addWidget(labels_box, 1)
@@ -101,6 +101,7 @@ class GenerateTab(QWidget):
     def set_available_labels(self, labels: list[str]) -> None:
         previous = set(self.selected_labels())
         previous_comments = self.selected_label_comments()
+        previous_expected_ppms = self.selected_label_expected_ppms()
         self.labels_table.setRowCount(len(labels))
         for row, label in enumerate(labels):
             use_item = QTableWidgetItem()
@@ -111,6 +112,7 @@ class GenerateTab(QWidget):
             label_item.setFlags(label_item.flags() & ~Qt.ItemIsEditable)
             self.labels_table.setItem(row, 1, label_item)
             self.labels_table.setItem(row, 2, QTableWidgetItem(previous_comments.get(label, "")))
+            self.labels_table.setItem(row, 3, QTableWidgetItem(previous_expected_ppms.get(label, "")))
 
     def selected_labels(self) -> list[str]:
         labels: list[str] = []
@@ -137,6 +139,21 @@ class GenerateTab(QWidget):
             if comment:
                 comments[label] = comment
         return comments
+
+    def selected_label_expected_ppms(self) -> dict[str, str]:
+        expected_ppms: dict[str, str] = {}
+        for row in range(self.labels_table.rowCount()):
+            label_item = self.labels_table.item(row, 1)
+            expected_item = self.labels_table.item(row, 3)
+            if label_item is None:
+                continue
+            label = label_item.text().strip()
+            if not label:
+                continue
+            expected_ppm = expected_item.text().strip() if expected_item is not None else ""
+            if expected_ppm:
+                expected_ppms[label] = expected_ppm
+        return expected_ppms
 
     def _init_parameters_table(self) -> None:
         self.parameters_table.setRowCount(len(self.SUMMARY_PARAMETERS))
