@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -31,7 +32,9 @@ class GenerateTab(QWidget):
     ]
 
     export_clicked = Signal()
+    upload_to_notion_clicked = Signal()
     browse_folder_clicked = Signal()
+    summary_rows_changed = Signal(list)
 
     def __init__(self) -> None:
         super().__init__()
@@ -48,9 +51,13 @@ class GenerateTab(QWidget):
         folder_row.addWidget(self.btn_browse_folder)
 
         self.output_name_edit = QLineEdit()
+        self.output_format_combo = QComboBox()
+        self.output_format_combo.addItem("PDF (.pdf)", "pdf")
+        self.output_format_combo.addItem("Markdown (.md)", "md")
 
         export_form.addRow("Path", folder_row)
         export_form.addRow("Name", self.output_name_edit)
+        export_form.addRow("Format", self.output_format_combo)
         root.addWidget(export_box)
 
         labels_box = QGroupBox("Summary Labels")
@@ -70,17 +77,21 @@ class GenerateTab(QWidget):
         root.addWidget(parameters_box, 1)
 
         self._init_parameters_table()
+        self.parameters_table.itemChanged.connect(self._on_parameters_item_changed)
 
         self.status_label = QLabel("Ready")
         root.addWidget(self.status_label)
 
         row = QHBoxLayout()
         self.btn_export = QPushButton("Export Report")
+        self.btn_upload_notion = QPushButton("Upload to Notion")
         row.addWidget(self.btn_export)
+        row.addWidget(self.btn_upload_notion)
         row.addStretch(1)
         root.addLayout(row)
 
         self.btn_export.clicked.connect(self.export_clicked.emit)
+        self.btn_upload_notion.clicked.connect(self.upload_to_notion_clicked.emit)
         self.btn_browse_folder.clicked.connect(self.browse_folder_clicked.emit)
 
     def set_status(self, text: str) -> None:
@@ -97,6 +108,15 @@ class GenerateTab(QWidget):
 
     def output_name(self) -> str:
         return self.output_name_edit.text().strip()
+
+    def selected_output_format(self) -> str:
+        return str(self.output_format_combo.currentData() or "pdf")
+
+    def set_selected_output_format(self, fmt: str) -> None:
+        match = "md" if str(fmt).strip().lower() in {"md", "markdown"} else "pdf"
+        index = self.output_format_combo.findData(match)
+        if index >= 0:
+            self.output_format_combo.setCurrentIndex(index)
 
     def set_available_labels(self, labels: list[str]) -> None:
         previous = set(self.selected_labels())
@@ -177,3 +197,23 @@ class GenerateTab(QWidget):
             if use_item.checkState() == Qt.Checked:
                 parameters.append(parameter_item.text().strip())
         return parameters
+
+    def set_selected_parameters(self, selected: list[str]) -> None:
+        selected_set = {item for item in selected}
+        self.parameters_table.blockSignals(True)
+        try:
+            for row in range(self.parameters_table.rowCount()):
+                use_item = self.parameters_table.item(row, 0)
+                parameter_item = self.parameters_table.item(row, 1)
+                if use_item is None or parameter_item is None:
+                    continue
+                parameter = parameter_item.text().strip()
+                state = Qt.Checked if parameter in selected_set else Qt.Unchecked
+                use_item.setCheckState(state)
+        finally:
+            self.parameters_table.blockSignals(False)
+
+    def _on_parameters_item_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() != 0:
+            return
+        self.summary_rows_changed.emit(self.selected_parameters())

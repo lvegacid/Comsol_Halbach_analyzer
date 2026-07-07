@@ -13,6 +13,7 @@ class SimulationService:
     BFOV_3D_PATTERN = re.compile(r"^BFOV_", re.IGNORECASE)
     BFOV_HIST_PATTERN = re.compile(r"^BFOV_histogram_", re.IGNORECASE)
     BFOV_COORD_PATTERN = re.compile(r"^B_coordinates_", re.IGNORECASE)
+    PROJECTION_PATTERN = re.compile(r"(?:^|[^a-z0-9])(xy|yz|xz)(?:[^a-z0-9]|$)", re.IGNORECASE)
 
     def detect_first_level_subfolders(self, parent_folder: str) -> list[SimulationStudyConfig]:
         parent = Path(parent_folder)
@@ -42,6 +43,17 @@ class SimulationService:
 
         for png in png_files:
             name = png.stem
+            lower_name = name.lower()
+            projection = self._extract_projection(name)
+
+            if projection is not None and "magnets" in lower_name:
+                magnets.__setattr__(f"projection_{projection}", str(png))
+                continue
+
+            if projection is not None and self._is_fov_projection_name(lower_name):
+                domain_map["FOV"][f"projection_{projection}"] = str(png)
+                continue
+
             parsed_domain = self._parse_domain_filename(name)
             if parsed_domain is not None:
                 domain_name, kind = parsed_domain
@@ -70,6 +82,9 @@ class SimulationService:
                     histogram=kinds.get("histogram"),
                     custom_coordinates=kinds.get("customcoordinates"),
                     histogram_txt=kinds.get("histogram_txt"),
+                    projection_xy=kinds.get("projection_xy"),
+                    projection_yz=kinds.get("projection_yz"),
+                    projection_xz=kinds.get("projection_xz"),
                 )
             )
 
@@ -81,6 +96,20 @@ class SimulationService:
             domains=domains,
             magnets=magnets,
         )
+
+    def _extract_projection(self, stem: str) -> str | None:
+        match = self.PROJECTION_PATTERN.search(stem.lower())
+        if not match:
+            return None
+        return match.group(1).lower()
+
+    @staticmethod
+    def _is_fov_projection_name(lower_name: str) -> bool:
+        if lower_name.startswith("bfov"):
+            return True
+        if lower_name.startswith("b_fov"):
+            return True
+        return "_fov" in lower_name
 
     def _parse_domain_filename(self, stem: str) -> tuple[str, str] | None:
         kinds = ["3DPlot", "Histogram", "CustomCoordinates"]

@@ -18,7 +18,7 @@
 % Nota:
 %   Ademas del TXT principal (histograma), se genera un TXT extra para el
 %   plot 3D con sufijo "_plot3d".
-function export_dataset(model, datasetTag, txtPath, pngPath, selectionTag, selectionLabel, histBins)
+function export_dataset(model, datasetTag, txtPath, pngPath, selectionTag, selectionLabel, histBins, projectionOrthoScale)
 
     if nargin < 5
         selectionTag = '';
@@ -28,6 +28,9 @@ function export_dataset(model, datasetTag, txtPath, pngPath, selectionTag, selec
     end
     if nargin < 7 || isempty(histBins)
         histBins = 100;
+    end
+    if nargin < 8 || isempty(projectionOrthoScale)
+        projectionOrthoScale = 0.35;
     end
 
     histBins = floor(double(histBins));
@@ -145,7 +148,7 @@ function export_dataset(model, datasetTag, txtPath, pngPath, selectionTag, selec
 
             % Extiende con vistas ortograficas sin alterar el flujo 3D existente.
             try
-                export_orthographic_views(model, pg3dTag, imgTag, pngPath, datasetTag);
+                export_orthographic_views(model, pg3dTag, imgTag, pngPath, datasetTag, projectionOrthoScale);
             catch
             end
         catch errStage
@@ -332,7 +335,11 @@ function move_file_overwrite(srcPath, dstPath)
 end
 
 % -------------------------------------------------------------------------
-function export_orthographic_views(model, pg3dTag, imgTag, mainPngPath, datasetTag)
+function export_orthographic_views(model, pg3dTag, imgTag, mainPngPath, datasetTag, projectionOrthoScale)
+    if nargin < 6 || isempty(projectionOrthoScale)
+        projectionOrthoScale = 0.35;
+    end
+
     [xyPath, yzPath, xzPath] = derive_orthographic_png_paths(mainPngPath);
 
     ensure_parent_dir_exists(xyPath);
@@ -388,7 +395,7 @@ function export_orthographic_views(model, pg3dTag, imgTag, mainPngPath, datasetT
     model.component("comp1").view("view2").camera().set("projection", "orthographic");
     model.component("comp1").view("view2").camera().set("up", [0, 1, 0]);
     model.component("comp1").view("view2").camera().set("position", [0, 0, 1]);
-    model.component("comp1").view("view2").camera().set("orthoscale", 0.2);
+    model.component("comp1").view("view2").camera().set("orthoscale", projectionOrthoScale);
     try; model.result(pg3dTag).run; catch; end
     export_orthographic_png_with_existing_export(model, imgTag, xyPath, [datasetTag '_xy']);
 
@@ -396,15 +403,15 @@ function export_orthographic_views(model, pg3dTag, imgTag, mainPngPath, datasetT
     model.component("comp1").view("view2").camera().set("projection", "orthographic");
     model.component("comp1").view("view2").camera().set("position", [1, 0, 0]);
     model.component("comp1").view("view2").camera().set("up", [0, 0, 1]);
-    model.component("comp1").view("view2").camera().set("orthoscale", 0.2);
+    model.component("comp1").view("view2").camera().set("orthoscale", projectionOrthoScale);
     try; model.result(pg3dTag).run; catch; end
     export_orthographic_png_with_existing_export(model, imgTag, yzPath, [datasetTag '_yz']);
 
     % XZ view
     model.component("comp1").view("view2").camera().set("projection", "orthographic");
     model.component("comp1").view("view2").camera().set("position", [0, 1, 0]);
-    model.component("comp1").view("view2").camera().set("up", [0, 1, 0]);
-    model.component("comp1").view("view2").camera().set("orthoscale", 0.2);
+    model.component("comp1").view("view2").camera().set("up", [0, 0, 1]);
+    model.component("comp1").view("view2").camera().set("orthoscale", projectionOrthoScale);
     try; model.result(pg3dTag).run; catch; end
     export_orthographic_png_with_existing_export(model, imgTag, xzPath, [datasetTag '_xz']);
 

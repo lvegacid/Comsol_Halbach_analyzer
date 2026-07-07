@@ -113,6 +113,11 @@ chkBfov3D = uicheckbox(fig, ...
     'Position', [20 173 220 22], ...
     'Value', true);
 
+chkProjectionScale = uicheckbox(fig, ...
+    'Text', 'Change orthoscale for projections', ...
+    'Position', [250 173 250 22], ...
+    'Value', false);
+
 chkBfovHist = uicheckbox(fig, ...
     'Text', 'B_FOV Histogram', ...
     'Position', [20 149 220 22], ...
@@ -271,6 +276,7 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         btnRun.Position = [left runY 150 30];
         btnRunGeometry.Position = [left + 160 runY 170 30];
         chkBfov3D.Position = [left chk3DY 220 22];
+        chkProjectionScale.Position = [left + 230 chk3DY 250 22];
         chkBfovHist.Position = [left chkHistY 220 22];
         chkBfovCoord.Position = [left chkCoordY 250 22];
         chkChangeDefaultFov.Position = [left chkDomainY 220 22];
@@ -708,6 +714,7 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         options.enableCustomCoordinates = logical(chkBfovCoord.Value);
         options.enableMagnets3DPlot = logical(chkMagnets3D.Value);
         options.enableMagnetsHistogram = logical(chkMagnetsHist.Value);
+        options.projectionOrthoScale = getpref('ComsolAnalyzer', 'ProjectionOrthoScale', 0.35);
         options.domainMode = false;
         options.domainSelections = struct('tag', {}, 'label', {});
 
@@ -724,6 +731,16 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
             options.enable3DPlot = logical(domainCfg.enable3DPlot);
             options.enableHistogram = logical(domainCfg.enableHistogram);
             options.enableCustomCoordinates = logical(domainCfg.enableCustomCoordinates);
+        end
+
+        if options.enable3DPlot && logical(chkProjectionScale.Value)
+            [okProjectionScale, projectionOrthoScale] = ask_projection_orthoscale();
+            if ~okProjectionScale
+                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                appendLog('INFO', ts, '', 'Extracción cancelada por el usuario (configuración de orthoscale).');
+                return;
+            end
+            options.projectionOrthoScale = projectionOrthoScale;
         end
 
         if ~options.enable3DPlot && ~options.enableHistogram && ~options.enableCustomCoordinates && ...
@@ -1637,6 +1654,30 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         setpref('ComsolAnalyzer', 'MagnetsHistogramBins', bins);
         setpref('ComsolAnalyzer', 'MagnetsHistogramStepPercent', stepPercent);
         setpref('ComsolAnalyzer', 'MagnetsHistogramBr', br);
+        ok = true;
+    end
+
+    function [ok, projectionOrthoScale] = ask_projection_orthoscale()
+        ok = false;
+        projectionOrthoScale = getpref('ComsolAnalyzer', 'ProjectionOrthoScale', 0.35);
+
+        answer = inputdlg( ...
+            {'Projection orthoscale (For zoomout increase orthoscale):'}, ...
+            'Projection orthoscale', ...
+            1, ...
+            {num2str(projectionOrthoScale)});
+        if isempty(answer)
+            return;
+        end
+
+        candidate = str2double(strtrim(answer{1}));
+        if isnan(candidate) || ~isfinite(candidate) || candidate <= 0
+            uialert(fig, 'Enter a positive orthoscale value. For zoomout increase orthoscale.', 'Invalid value');
+            return;
+        end
+
+        projectionOrthoScale = candidate;
+        setpref('ComsolAnalyzer', 'ProjectionOrthoScale', projectionOrthoScale);
         ok = true;
     end
 

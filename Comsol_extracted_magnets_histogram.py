@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 from datetime import datetime
 
@@ -16,6 +17,7 @@ def parse_args():
     parser.add_argument("--step-percent", dest="step_percent", type=float, default=2.0, help="Paso porcentual para bins")
     parser.add_argument("--same-name-png", action="store_true", help="Guardar como <txt>.png")
     parser.add_argument("--no-show", action="store_true", help="No abrir ventanas de plot")
+    parser.add_argument("--emit-metrics-json", dest="emit_metrics_json", help="Exporta métricas Magnets en JSON")
     return parser.parse_args()
 
 
@@ -401,6 +403,22 @@ fig2.subplots_adjust(
     top=0.72,
 )
 plt.savefig(output_path_M, dpi=300, bbox_inches="tight")
+
+if args.emit_metrics_json:
+    payload = {
+        "lt_98_pct": float(V_lt_98),
+        "lt_95_pct": float(V_lt_95),
+        "lt_90_pct": float(V_lt_90),
+        "lt_85_pct": float(V_lt_85),
+        "wdv": float(wdv),
+        "m_min_t": float(M_min),
+        "m_min_pct": float(to_percent(M_min)),
+        "m_max_t": float(M_max_real),
+        "m_max_pct": float(to_percent(M_max_real)),
+        "br_t": float(Br),
+    }
+    with open(args.emit_metrics_json, "w", encoding="utf-8") as fp:
+        json.dump(payload, fp, indent=2)
 
 if not args.no_show:
     plt.show()

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from app.models.entities import AppSettings, MaterialCurve
+from app.models.entities import AppSettings, AttachedImageInfo, MaterialCurve
 
 
 class SettingsService:
@@ -28,11 +28,29 @@ class SettingsService:
             return settings
         with self._settings_path.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        return AppSettings.from_dict(data)
+        settings = AppSettings.from_dict(data)
+        original_token = settings.notion_token
+        self._sanitize_settings(settings)
+        if settings.notion_token != original_token:
+            self.save_settings(settings)
+        return settings
 
     def save_settings(self, settings: AppSettings) -> None:
         with self._settings_path.open("w", encoding="utf-8") as f:
             json.dump(settings.to_dict(), f, indent=2)
+
+    @staticmethod
+    def _sanitize_settings(settings: AppSettings) -> AppSettings:
+        token = settings.notion_token.strip()
+        if (
+            not token
+            or "\n" in token
+            or "\r" in token
+            or len(token) < 20
+            or not token.startswith(("secret_", "ntn_"))
+        ):
+            settings.notion_token = ""
+        return settings
 
     def load_materials(self) -> dict[str, MaterialCurve]:
         if not self._materials_path.exists():
@@ -55,13 +73,28 @@ class SettingsService:
         materials: dict[str, MaterialCurve] = {}
         for name, raw in data.items():
             parsed_points: list[tuple[float, float]] = []
-            link = ""
             comment = ""
+            links: list[str] = []
+            images: list[AttachedImageInfo] = []
 
             if isinstance(raw, dict):
                 raw_points = raw.get("points", [])
-                link = str(raw.get("link", "") or "")
                 comment = str(raw.get("comment", "") or "")
+                legacy_link = str(raw.get("link", "") or "").strip()
+                raw_links = raw.get("links", [])
+                if isinstance(raw_links, list):
+                    links = [str(item).strip() for item in raw_links if str(item).strip()]
+                if legacy_link and legacy_link not in links:
+                    links.insert(0, legacy_link)
+
+                raw_images = raw.get("images", [])
+                if isinstance(raw_images, list):
+                    for item in raw_images:
+                        if isinstance(item, dict):
+                            path = str(item.get("path", "") or "").strip()
+                            if not path:
+                                continue
+                            images.append(AttachedImageInfo(path=path, comment=str(item.get("comment", "") or "")))
             else:
                 # Backward compatibility with legacy schema: material -> [[h, b], ...]
                 raw_points = raw
@@ -69,15 +102,16 @@ class SettingsService:
             for row in raw_points:
                 if isinstance(row, list) and len(row) >= 2:
                     parsed_points.append((float(row[0]), float(row[1])))
-            materials[name] = MaterialCurve(name=name, points=parsed_points, link=link, comment=comment)
+            materials[name] = MaterialCurve(name=name, points=parsed_points, comment=comment, links=links, images=images)
         return materials
 
     def save_materials(self, materials: dict[str, MaterialCurve]) -> None:
         serializable = {
             name: {
                 "points": [[p[0], p[1]] for p in mat.points],
-                "link": mat.link,
                 "comment": mat.comment,
+                "links": list(mat.links),
+                "images": [{"path": img.path, "comment": img.comment} for img in mat.images],
             }
             for name, mat in materials.items()
         }

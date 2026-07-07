@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from app.models.entities import SimulationStudyResult
+from app.models.entities import MagnetHistogramSummary, SimulationStudyResult
 
 
 class HistogramMetricsService:
@@ -83,7 +83,10 @@ class HistogramMetricsService:
     ]
 
     def __init__(self) -> None:
-        self._script_path = Path(__file__).resolve().parents[4] / "Comsol_extracted_histograms_BFOV_Magnets.py"
+        # services/ -> app/ -> magnetic_report_generator/ -> Comsol_analyzer/
+        project_root = Path(__file__).resolve().parents[3]
+        self._script_path = project_root / "Comsol_extracted_histograms_BFOV_Magnets.py"
+        self._magnets_script_path = project_root / "Comsol_extracted_magnets_histogram.py"
 
     def ensure_metrics_for_study(self, study: SimulationStudyResult) -> dict[str, dict[str, float]]:
         output_file = Path(study.folder_path) / f"{study.folder_name}_Data_extracted_histograms.txt"
@@ -103,7 +106,158 @@ class HistogramMetricsService:
 
         if added_any or not output_file.exists():
             self._write_metrics_file(output_file, existing)
+
+        study.magnet_histogram_summary = self._ensure_magnet_summary_for_study(study)
         return existing
+
+    def _ensure_magnet_summary_for_study(self, study: SimulationStudyResult) -> MagnetHistogramSummary | None:
+        histogram_txt = self._collect_magnets_histogram_txt(study)
+        if histogram_txt is None:
+            return None
+
+        br_t = self._infer_study_br_t(study)
+        return self._compute_magnet_summary_from_script(histogram_txt, br_t)
+
+    def _collect_magnets_histogram_txt(self, study: SimulationStudyResult) -> Path | None:
+        if study.magnets.histogram:
+            candidate = Path(study.magnets.histogram).with_suffix(".txt")
+            if candidate.exists():
+                return candidate
+
+        for txt_path in Path(study.folder_path).rglob("*.txt"):
+            if txt_path.name.lower().startswith("magnets_histogram") or txt_path.name.lower().startswith("main_magnets_histogram"):
+                return txt_path
+        return None
+
+    @staticmethod
+    def _infer_study_br_t(study: SimulationStudyResult) -> float:
+        if study.material_curve and study.material_curve.points:
+            try:
+                return max(float(point[1]) for point in study.material_curve.points)
+            except Exception:
+                pass
+        return 1.4
+
+    def _compute_magnet_summary_from_script(self, histogram_txt: Path, br_t: float) -> MagnetHistogramSummary | None:
+        if not histogram_txt.exists() or not self._magnets_script_path.exists():
+            return self._compute_magnet_summary_locally(histogram_txt, br_t)
+
+        with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False, encoding="utf-8") as tmp:
+            metrics_json = Path(tmp.name)
+
+        cmd = [
+            sys.executable,
+            str(self._magnets_script_path),
+            "--file-path-m",
+            str(histogram_txt),
+            "--br",
+            str(br_t),
+            "--no-show",
+            "--emit-metrics-json",
+            str(metrics_json),
+        ]
+
+        try:
+            completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if completed.returncode != 0 or not metrics_json.exists():
+                return self._compute_magnet_summary_locally(histogram_txt, br_t)
+
+            with metrics_json.open("r", encoding="utf-8") as f:
+                raw = json.load(f)
+
+            return MagnetHistogramSummary(
+                lt_98_pct=float(raw.get("lt_98_pct", 0.0)),
+                lt_95_pct=float(raw.get("lt_95_pct", 0.0)),
+                lt_90_pct=float(raw.get("lt_90_pct", 0.0)),
+                lt_85_pct=float(raw.get("lt_85_pct", 0.0)),
+                wdv=float(raw.get("wdv", 0.0)),
+                m_min_t=float(raw.get("m_min_t", 0.0)),
+                m_min_pct=float(raw.get("m_min_pct", 0.0)),
+                m_max_t=float(raw.get("m_max_t", 0.0)),
+                m_max_pct=float(raw.get("m_max_pct", 0.0)),
+                br_t=float(raw.get("br_t", br_t)),
+            )
+        except Exception:
+            return self._compute_magnet_summary_locally(histogram_txt, br_t)
+        finally:
+            try:
+                metrics_json.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _compute_magnet_summary_locally(self, histogram_txt: Path, br_t: float) -> MagnetHistogramSummary | None:
+        if not histogram_txt.exists() or not np.isfinite(br_t) or br_t <= 0:
+            return None
+        try:
+            data = np.loadtxt(str(histogram_txt), comments="%")
+            if data.ndim == 1:
+                if data.size < 2:
+                    return None
+                data = np.array([data])
+            if data.shape[1] < 2:
+                return None
+
+            m_t = data[:, 0].astype(float)
+            hist = data[:, 1].astype(float)
+            mask = hist > 0
+            if not np.any(mask):
+                return None
+
+            m_real = m_t[mask]
+            hist_real = hist[mask]
+            m_percent = (m_t / br_t) * 100.0
+
+            lt_98 = self._cumulative_volume_percent_below(98.0, m_percent, hist)
+            lt_95 = self._cumulative_volume_percent_below(95.0, m_percent, hist)
+            lt_90 = self._cumulative_volume_percent_below(90.0, m_percent, hist)
+            lt_85 = self._cumulative_volume_percent_below(85.0, m_percent, hist)
+            lt_80 = self._cumulative_volume_percent_below(80.0, m_percent, hist)
+
+            wdv = 0.5 * lt_98 + 1.0 * lt_95 + 2.0 * lt_90 + 5.0 * lt_85 + 10.0 * lt_80
+            m_min = float(np.min(m_real))
+            m_max = float(np.max(m_real))
+
+            return MagnetHistogramSummary(
+                lt_98_pct=float(lt_98),
+                lt_95_pct=float(lt_95),
+                lt_90_pct=float(lt_90),
+                lt_85_pct=float(lt_85),
+                wdv=float(wdv),
+                m_min_t=m_min,
+                m_min_pct=(m_min / br_t) * 100.0,
+                m_max_t=m_max,
+                m_max_pct=(m_max / br_t) * 100.0,
+                br_t=float(br_t),
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _compute_bin_edges(centers: np.ndarray) -> np.ndarray:
+        centers = np.asarray(centers, dtype=float)
+        if centers.size < 2:
+            c = centers[0] if centers.size == 1 else 0.0
+            return np.array([c - 0.5, c + 0.5], dtype=float)
+        mids = 0.5 * (centers[:-1] + centers[1:])
+        left = centers[0] - 0.5 * (centers[1] - centers[0])
+        right = centers[-1] + 0.5 * (centers[-1] - centers[-2])
+        return np.concatenate(([left], mids, [right]))
+
+    @classmethod
+    def _cumulative_volume_percent_below(cls, threshold_percent: float, centers: np.ndarray, weights: np.ndarray) -> float:
+        edges = cls._compute_bin_edges(centers)
+        weights = np.asarray(weights, dtype=float)
+        widths = np.diff(edges)
+        total = float(np.sum(widths * weights))
+        if total <= 0:
+            return 0.0
+
+        thr = float(threshold_percent)
+        lefts = edges[:-1]
+        rights = edges[1:]
+        overlap = np.maximum(0.0, np.minimum(thr, rights) - lefts)
+        vol = float(np.sum(overlap * weights))
+        return (vol / total) * 100.0
 
     def _collect_histogram_candidates(self, study: SimulationStudyResult, output_file: Path) -> dict[str, Path]:
         candidates: dict[str, Path] = {}
@@ -123,16 +277,12 @@ class HistogramMetricsService:
             if txt_path is not None:
                 candidates[domain.name] = txt_path
 
-        # Include magnets histogram when present.
-        if study.magnets.histogram:
-            magnets_txt = Path(study.magnets.histogram).with_suffix(".txt")
-            if magnets_txt.exists() and "Magnets" not in candidates:
-                candidates["Magnets"] = magnets_txt
-
         # Discover histogram TXT files from histogram PNG naming patterns.
         for png_path in Path(study.folder_path).rglob("*.png"):
             label = self._label_from_histogram_png_stem(png_path.stem)
             if not label:
+                continue
+            if label == "Magnets":
                 continue
             guessed_txt = self._guess_histogram_txt_from_png(png_path)
             if guessed_txt is not None:
@@ -144,6 +294,8 @@ class HistogramMetricsService:
                 continue
             label = self._label_from_histogram_txt(study.folder_name, txt_path)
             if not label:
+                continue
+            if label == "Magnets":
                 continue
             candidates.setdefault(label, txt_path)
 

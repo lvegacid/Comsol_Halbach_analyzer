@@ -84,6 +84,7 @@ function options = default_extraction_options()
     options.enableCustomCoordinates = false;
     options.enableMagnets3DPlot = false;
     options.enableMagnetsHistogram = false;
+    options.projectionOrthoScale = 0.35;
     options.domainMode = false;
     options.domainSelections = struct('tag', {}, 'label', {});
     options.histBins = 100;
@@ -161,9 +162,9 @@ function run_bfov_exports(model, ds, folderPath, modelName, fovInfo, options, lo
     if doMainExports
         % Flujo historico estable: export_dataset + postproceso Python
         if useDomainSelection
-            export_dataset(model, ds.tag, histTxtPath, plot3dPngPath, selectionTag, titleText, options.histBins);
+            export_dataset(model, ds.tag, histTxtPath, plot3dPngPath, selectionTag, titleText, options.histBins, options.projectionOrthoScale);
         else
-            export_dataset(model, ds.tag, histTxtPath, plot3dPngPath);
+            export_dataset(model, ds.tag, histTxtPath, plot3dPngPath, '', '', options.histBins, options.projectionOrthoScale);
         end
     end
 
@@ -420,22 +421,31 @@ function run_magnets_python_postprocess(magnetsTxtPath, magnetInfo, analysisName
     [txtDir, txtName, ~] = fileparts(magnetsTxtPath);
     outputPng = fullfile(txtDir, [txtName '.png']);
 
+    [txtPathForPython, outputPngForPython, cleanupFolder] = prepare_python_temp_io(magnetsTxtPath, outputPng);
+    cleanupObj = onCleanup(@() cleanup_temp_folder(cleanupFolder)); %#ok<NASGU>
+
     args = [...
-        ' --file-path-m '    q(magnetsTxtPath), ...
+        ' --file-path-m '    q(txtPathForPython), ...
         ' --magnet-info '    q(magnetInfo), ...
         ' --analysis '       q(analysisName), ...
-        ' --output-png-m '   q(outputPng), ...
+        ' --output-png-m '   q(outputPngForPython), ...
         ' --br '             q(num2str(br, '%.15g')), ...
         ' --step-percent '   q(num2str(stepPercent, '%.15g')), ...
-        ' --magnets-only --no-show'];
+        ' --no-show'];
 
-    pyCandidates = {'python', 'python3'};
+    pyCandidates = get_python_command_candidates();
     errors = {};
 
     for i = 1:numel(pyCandidates)
         cmd = [pyCandidates{i} ' ' q(scriptPath) args];
         [status, out] = system(cmd);
         if status == 0
+            if ~strcmp(outputPngForPython, outputPng)
+                [okCopy, copyMsg] = copyfile(outputPngForPython, outputPng, 'f');
+                if ~okCopy
+                    error('PNG generado por Python, pero no se pudo copiar al destino final: %s', copyMsg);
+                end
+            end
             return;
         end
         errors{end+1} = sprintf('%s: %s', pyCandidates{i}, strtrim(out)); %#ok<AGROW>

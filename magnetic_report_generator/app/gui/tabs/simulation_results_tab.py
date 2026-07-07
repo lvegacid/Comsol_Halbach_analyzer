@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.gui.dialogs.material_dialog import MaterialDialog, NewMaterialDialog
-from app.models.entities import MaterialCurve, SimulationStudyConfig
+from app.models.entities import AttachedImageInfo, MaterialCurve, SimulationStudyConfig
 from app.services.settings_service import SettingsService
 from app.services.simulation_service import SimulationService
 
@@ -215,8 +215,9 @@ class SimulationResultsTab(QWidget):
         self._materials[name] = MaterialCurve(
             name=name,
             points=list(source_material.points),
-            link=source_material.link,
             comment=source_material.comment,
+            links=list(source_material.links),
+            images=[AttachedImageInfo(path=item.path, comment=item.comment) for item in source_material.images],
         )
         self._persist_materials()
 

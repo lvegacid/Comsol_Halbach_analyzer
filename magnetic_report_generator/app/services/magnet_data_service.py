@@ -12,6 +12,7 @@ from app.models.entities import AttachedImageInfo, MagnetMetrics, RingInfo
 class MagnetDataService:
     EXPECTED_COLUMNS = ["x", "y", "z", "Br", "mx", "my", "mz", "sx", "sy", "sz"]
     M_TO_MM = 1000.0
+    CENTER_ZERO_TOL_MM = 1e-3
 
     @staticmethod
     def _fmt_measure(value: float, decimals: int = 3) -> str:
@@ -77,19 +78,11 @@ class MagnetDataService:
 
         magnet_length_mm = float(df["x"].max() - df["x"].min())
 
-        y_range = float(df["y"].max() - df["y"].min())
-        z_range = float(df["z"].max() - df["z"].min())
+        y_centers = df["y"].to_numpy(dtype=float)
+        z_centers = df["z"].to_numpy(dtype=float)
 
-        if y_range >= z_range:
-            major_value = y_range
-            major_axis = "Y"
-            minor_value = z_range
-            minor_axis = "Z"
-        else:
-            major_value = z_range
-            major_axis = "Z"
-            minor_value = y_range
-            minor_axis = "Y"
+        y_length_min, y_length_max = self._compute_axis_length_range_mm(axis_centers=y_centers, orthogonal_centers=z_centers)
+        z_length_min, z_length_max = self._compute_axis_length_range_mm(axis_centers=z_centers, orthogonal_centers=y_centers)
 
         size_triplets = np.round(df[["sx", "sy", "sz"]].to_numpy(dtype=float), 6)
         unique_triplets = np.unique(size_triplets, axis=0)
@@ -119,10 +112,10 @@ class MagnetDataService:
             br_t=br_t,
             magnet_size_mm3=magnet_size_mm3,
             magnet_length_mm=magnet_length_mm,
-            major_ellipse_side_mm=major_value,
-            major_axis_direction=major_axis,
-            minor_ellipse_side_mm=minor_value,
-            minor_axis_direction=minor_axis,
+            y_length_min_mm=y_length_min,
+            y_length_max_mm=y_length_max,
+            z_length_min_mm=z_length_min,
+            z_length_max_mm=z_length_max,
             interring_distance_mm=interring_distance_mm,
             interring_note=interring_note,
             expected_ppm=expected_ppm,
@@ -130,3 +123,21 @@ class MagnetDataService:
             other_info_images=[AttachedImageInfo(path=item.path, comment=item.comment) for item in (other_info_images or [])],
             rings=rings,
         )
+
+    def _compute_axis_length_range_mm(self, axis_centers: np.ndarray, orthogonal_centers: np.ndarray) -> tuple[float, float]:
+        # Primary path: keep only centers lying on the orthogonal near-zero plane.
+        near_zero = np.isclose(orthogonal_centers, 0.0, atol=self.CENTER_ZERO_TOL_MM)
+        selected = axis_centers[near_zero]
+
+        if selected.size == 0:
+            # Fallback: if no exact near-zero centers exist, use the closest orthogonal slice.
+            min_abs = float(np.min(np.abs(orthogonal_centers))) if orthogonal_centers.size else 0.0
+            closest = np.isclose(np.abs(orthogonal_centers), min_abs, atol=self.CENTER_ZERO_TOL_MM)
+            selected = axis_centers[closest]
+
+        if selected.size == 0:
+            return 0.0, 0.0
+
+        axis_min = float(np.min(selected))
+        axis_max = float(np.max(selected))
+        return abs(axis_min) * 2.0, abs(axis_max) * 2.0

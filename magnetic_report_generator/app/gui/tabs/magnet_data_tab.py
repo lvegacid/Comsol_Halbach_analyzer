@@ -29,6 +29,7 @@ class MagnetDataTab(QWidget):
         super().__init__()
         self._service = service
         self.metrics: MagnetMetrics | None = None
+        self._last_browse_dir: str = ""
 
         root = QVBoxLayout(self)
 
@@ -91,10 +92,12 @@ class MagnetDataTab(QWidget):
         self.btn_clear_images.clicked.connect(self.on_clear_images)
 
     def on_browse(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Open Magnet TXT", "", "Text files (*.txt);;All files (*)")
+        start_dir = self._last_browse_dir or self.txt_path_edit.text().strip()
+        path, _ = QFileDialog.getOpenFileName(self, "Open Magnet TXT", start_dir, "Text files (*.txt);;All files (*)")
         if path:
             self.txt_path_edit.setText(path)
             self.magnet_characteristics_edit.setText(Path(path).name)
+            self._last_browse_dir = str(Path(path).parent)
             expected = self._service.detect_expected_ppm_from_filename(path)
             if expected is not None:
                 self.expected_ppm_edit.setText(self._format_number(expected))
@@ -136,8 +139,8 @@ class MagnetDataTab(QWidget):
                     f"Br: {m.br_t:.6f} T",
                     f"Size: {m.magnet_size_mm3} mm^3",
                     f"Length: {self._format_number(m.magnet_length_mm, 3)} mm",
-                    f"Major: {self._format_number(m.major_ellipse_side_mm, 3)} ({m.major_axis_direction})",
-                    f"Minor: {self._format_number(m.minor_ellipse_side_mm, 3)} ({m.minor_axis_direction})",
+                    f"Y_length: {self._format_range_mm(m.y_length_min_mm, m.y_length_max_mm, 3)}",
+                    f"Z_length: {self._format_range_mm(m.z_length_min_mm, m.z_length_max_mm, 3)}",
                     f"InterRing: {self._format_number(m.interring_distance_mm) if m.interring_distance_mm is not None else m.interring_note}",
                     f"Expected ppm: {self._format_number(m.expected_ppm) if m.expected_ppm is not None else 'N/A'}",
                 ]
@@ -151,14 +154,16 @@ class MagnetDataTab(QWidget):
             self.ring_table.setItem(row_idx, 2, QTableWidgetItem(str(ring.magnets)))
 
     def on_attach_images(self) -> None:
+        start_dir = self._last_browse_dir or self.txt_path_edit.text().strip()
         paths, _ = QFileDialog.getOpenFileNames(
             self,
             "Attach images",
-            "",
+            start_dir,
             "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp);;All files (*)",
         )
         if not paths:
             return
+        self._last_browse_dir = str(Path(paths[0]).parent)
 
         existing = {item.path for item in self.other_info_images}
         for p in paths:
@@ -199,3 +204,20 @@ class MagnetDataTab(QWidget):
         if abs(rounded - int(rounded)) < 1e-9:
             return str(int(rounded))
         return (f"{rounded:.{decimals}f}").rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _format_range_mm(min_value: float, max_value: float, decimals: int = 3) -> str:
+        min_txt = MagnetDataTab._format_number(min_value, decimals)
+        max_txt = MagnetDataTab._format_number(max_value, decimals)
+        if abs(float(min_value) - float(max_value)) < 1e-9:
+            return f"{max_txt} mm"
+        return f"[{min_txt}, {max_txt}] mm"
+
+    def set_last_browse_dir(self, path: str) -> None:
+        if not path:
+            return
+        p = Path(path)
+        if p.exists() and p.is_dir():
+            self._last_browse_dir = str(p)
+        elif p.exists():
+            self._last_browse_dir = str(p.parent)

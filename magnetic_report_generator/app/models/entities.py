@@ -31,10 +31,10 @@ class MagnetMetrics:
     br_t: float
     magnet_size_mm3: str
     magnet_length_mm: float
-    major_ellipse_side_mm: float
-    major_axis_direction: str
-    minor_ellipse_side_mm: float
-    minor_axis_direction: str
+    y_length_min_mm: float
+    y_length_max_mm: float
+    z_length_min_mm: float
+    z_length_max_mm: float
     interring_distance_mm: float | None = None
     interring_note: str = ""
     expected_ppm: float | None = None
@@ -47,8 +47,9 @@ class MagnetMetrics:
 class MaterialCurve:
     name: str
     points: list[tuple[float, float]]
-    link: str = ""
     comment: str = ""
+    links: list[str] = field(default_factory=list)
+    images: list[AttachedImageInfo] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -67,12 +68,32 @@ class DomainFigures:
     histogram: str | None = None
     custom_coordinates: str | None = None
     histogram_txt: str | None = None
+    projection_xy: str | None = None
+    projection_yz: str | None = None
+    projection_xz: str | None = None
 
 
 @dataclass(slots=True)
 class MagnetsFigures:
     plot_3d: str | None = None
     histogram: str | None = None
+    projection_xy: str | None = None
+    projection_yz: str | None = None
+    projection_xz: str | None = None
+
+
+@dataclass(slots=True)
+class MagnetHistogramSummary:
+    lt_98_pct: float
+    lt_95_pct: float
+    lt_90_pct: float
+    lt_85_pct: float
+    wdv: float
+    m_min_t: float
+    m_min_pct: float
+    m_max_t: float
+    m_max_pct: float
+    br_t: float
 
 
 @dataclass(slots=True)
@@ -85,13 +106,15 @@ class SimulationStudyResult:
     domains: list[DomainFigures] = field(default_factory=list)
     magnets: MagnetsFigures = field(default_factory=MagnetsFigures)
     histogram_metrics: dict[str, dict[str, float]] = field(default_factory=dict)
+    magnet_histogram_summary: MagnetHistogramSummary | None = None
 
 
 @dataclass(slots=True)
 class ReportPayload:
     magnet_metrics: MagnetMetrics | None
     studies: list[SimulationStudyResult]
-    output_pdf: Path
+    output_path: Path
+    output_format: str = "pdf"
     summary_labels: list[str] = field(default_factory=list)
     summary_parameters: list[str] = field(default_factory=list)
     report_comment: str = ""
@@ -110,6 +133,15 @@ class AppSettings:
     last_expected_ppm: str = ""
     last_other_information: str = ""
     last_report_comment: str = ""
+    last_summary_rows: list[str] | None = None
+    notion_token: str = ""
+    notion_author_name: str = "Lorena Vega"
+    notion_author_user_id: str = ""
+    notion_projects_database_id: str = ""
+    notion_simulation_logs_database_id: str = ""
+    notion_last_project_page_id: str = ""
+    notion_known_tags: list[str] = field(default_factory=list)
+    notion_last_selected_tags: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -122,6 +154,15 @@ class AppSettings:
             "last_expected_ppm": self.last_expected_ppm,
             "last_other_information": self.last_other_information,
             "last_report_comment": self.last_report_comment,
+            "last_summary_rows": None if self.last_summary_rows is None else list(self.last_summary_rows),
+            "notion_token": self.notion_token,
+            "notion_author_name": self.notion_author_name,
+            "notion_author_user_id": self.notion_author_user_id,
+            "notion_projects_database_id": self.notion_projects_database_id,
+            "notion_simulation_logs_database_id": self.notion_simulation_logs_database_id,
+            "notion_last_project_page_id": self.notion_last_project_page_id,
+            "notion_known_tags": list(self.notion_known_tags),
+            "notion_last_selected_tags": list(self.notion_last_selected_tags),
         }
 
     @classmethod
@@ -136,6 +177,21 @@ class AppSettings:
             last_expected_ppm=str(data.get("last_expected_ppm", "")),
             last_other_information=str(data.get("last_other_information", "")),
             last_report_comment=str(data.get("last_report_comment", "")),
+            last_summary_rows=(
+                None
+                if "last_summary_rows" not in data
+                else [str(item) for item in data.get("last_summary_rows", []) if str(item).strip()]
+            ),
+            notion_token=str(data.get("notion_token", "")),
+            notion_author_name=str(data.get("notion_author_name", "Lorena Vega") or "Lorena Vega"),
+            notion_author_user_id=str(data.get("notion_author_user_id", "")),
+            notion_projects_database_id=str(data.get("notion_projects_database_id", "")),
+            notion_simulation_logs_database_id=str(data.get("notion_simulation_logs_database_id", "")),
+            notion_last_project_page_id=str(data.get("notion_last_project_page_id", "")),
+            notion_known_tags=[str(item).strip() for item in data.get("notion_known_tags", []) if str(item).strip()],
+            notion_last_selected_tags=[
+                str(item).strip() for item in data.get("notion_last_selected_tags", []) if str(item).strip()
+            ],
         )
 
 
