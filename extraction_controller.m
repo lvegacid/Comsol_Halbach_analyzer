@@ -23,12 +23,53 @@ function summary = extraction_controller(model, datasets, outputDir, modelName, 
         options = normalize_extraction_options(options);
     end
 
+    recoveryFn = [];
+    if isfield(options, 'connectionRecoveryFn') && isa(options.connectionRecoveryFn, 'function_handle')
+        recoveryFn = options.connectionRecoveryFn;
+    end
+
     nTotal = numel(datasets);
     nOK    = 0;
     nError = 0;
 
     for i = 1:nTotal
         ds = datasets(i);
+
+        % Pre-dataset connection probe: detect stale connection before any export call
+        connStatus = comsol_livelink_connection('status');
+        if ~connStatus.connected
+            recovered = false;
+            if ~isempty(recoveryFn)
+                [recovered, model, recoveryDetail] = try_recover_model(recoveryFn, model);
+                if recovered
+                    ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                    logFn('INFO', ts, ds.tag, 'Reconexion y recarga de modelo exitosas antes de exportar dataset.');
+                else
+                    connStatus = comsol_livelink_connection('connect');
+                    if ~connStatus.connected && ~isempty(strtrim(recoveryDetail))
+                        connStatus.detail = recoveryDetail;
+                    end
+                end
+            else
+                connStatus = comsol_livelink_connection('connect');
+            end
+
+            if ~recovered && ~connStatus.connected
+                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                logFn('WARN', ts, ds.tag, ...
+                    'LiveLink desconectado al inicio del dataset. No se pudo reconectar. Se detiene el lote.');
+                if ~isempty(strtrim(connStatus.detail))
+                    logFn('WARN', ts, ds.tag, ['Detalle de reconexion: ' connStatus.detail]);
+                end
+                progressFn(i, nTotal);
+                break;
+            end
+            if ~recovered
+                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                logFn('INFO', ts, ds.tag, 'Reconexion LiveLink exitosa antes de exportar dataset.');
+            end
+        end
+
         try
             ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
             logFn('INFO', ts, ds.tag, sprintf('Preparando dataset %d de %d: %s', i, nTotal, ds.shortLabel));
@@ -63,9 +104,43 @@ function summary = extraction_controller(model, datasets, outputDir, modelName, 
             if is_not_connected_error(err)
                 ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
                 logFn('WARN', ts, ds.tag, ...
-                    'LiveLink se desconecto del servidor COMSOL durante la exportacion. Se detiene el lote para evitar errores en cascada.');
-                progressFn(i, nTotal);
-                break;
+                    'LiveLink se desconecto durante la exportacion. Intentando reconexion...');
+
+                recovered = false;
+                recoveryDetail = '';
+                if ~isempty(recoveryFn)
+                    [recovered, model, recoveryDetail] = try_recover_model(recoveryFn, model);
+                end
+
+                if recovered
+                    nError = nError - 1;  % undo error count; will retry this dataset
+                    ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                    logFn('INFO', ts, ds.tag, 'Reconexion y recarga de modelo exitosas. Reintentando dataset...');
+                    progressFn(i, nTotal);
+                    continue;
+                else
+                    reconnStatus = comsol_livelink_connection('connect');
+                    if ~reconnStatus.connected && ~isempty(strtrim(recoveryDetail))
+                        reconnStatus.detail = recoveryDetail;
+                    end
+
+                    if reconnStatus.connected
+                        nError = nError - 1;  % undo error count; will retry this dataset
+                        ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                        logFn('INFO', ts, ds.tag, 'Reconexion exitosa. Reintentando dataset...');
+                        progressFn(i, nTotal);
+                        continue;
+                    end
+
+                    ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                    logFn('WARN', ts, ds.tag, ...
+                        'No se pudo reconectar con el servidor COMSOL. Se detiene el lote.');
+                    if ~isempty(strtrim(reconnStatus.detail))
+                        logFn('WARN', ts, ds.tag, ['Detalle de reconexion: ' reconnStatus.detail]);
+                    end
+                    progressFn(i, nTotal);
+                    break;
+                end
             end
         end
 
@@ -75,6 +150,32 @@ function summary = extraction_controller(model, datasets, outputDir, modelName, 
     summary.nOK      = nOK;
     summary.nError   = nError;
     summary.outputDir = outputDir;
+end
+
+% -------------------------------------------------------------------------
+function [ok, modelOut, detail] = try_recover_model(recoveryFn, modelIn)
+    ok = false;
+    modelOut = modelIn;
+    detail = '';
+
+    try
+        recoveryResult = recoveryFn();
+        if isstruct(recoveryResult)
+            if isfield(recoveryResult, 'connected') && logical(recoveryResult.connected)
+                ok = true;
+            end
+            if isfield(recoveryResult, 'model') && ~isempty(recoveryResult.model)
+                modelOut = recoveryResult.model;
+            end
+            if isfield(recoveryResult, 'detail')
+                detail = char(string(recoveryResult.detail));
+            end
+        elseif islogical(recoveryResult) || isnumeric(recoveryResult)
+            ok = logical(recoveryResult);
+        end
+    catch err
+        detail = err.message;
+    end
 end
 
 % -------------------------------------------------------------------------
@@ -91,6 +192,20 @@ function options = default_extraction_options()
     options.magnetsHistBins = 100;
     options.magnetsStepPercent = 2;
     options.magnetsBr = 1.4;
+    options.magnetsHistogram = struct( ...
+        'bins', 100, ...
+        'stepPercent', 2, ...
+        'br', 1.4, ...
+        'normMEnabled', true, ...
+        'normHEnabled', false, ...
+        'normH', struct( ...
+            'enabled', false, ...
+            'Hcb', [], ...
+            'Hcj', [], ...
+            'Hknee', [], ...
+            'Hlinear_end', [], ...
+            'extraH', struct('name', {}, 'value', {})));
+    options.normH = options.magnetsHistogram.normH;
     options.coordConfig = struct('model', 'Spherical coordinates', ...
         'source', 'spherical', ...
         'nTheta', 100, 'nPhi', 100, 'R', 0.1, ...
@@ -125,6 +240,38 @@ function options = normalize_extraction_options(options)
     if isfield(options.coordConfig, 'coordColumns')
         options.coordConfig.coordColumns = double(options.coordConfig.coordColumns(:).');
     end
+
+    if ~isstruct(options.magnetsHistogram)
+        options.magnetsHistogram = defaults.magnetsHistogram;
+    end
+
+    mhFields = fieldnames(defaults.magnetsHistogram);
+    for i = 1:numel(mhFields)
+        f = mhFields{i};
+        if ~isfield(options.magnetsHistogram, f)
+            options.magnetsHistogram.(f) = defaults.magnetsHistogram.(f);
+        end
+    end
+
+    if ~isstruct(options.magnetsHistogram.normH)
+        options.magnetsHistogram.normH = defaults.magnetsHistogram.normH;
+    end
+
+    normHFields = fieldnames(defaults.magnetsHistogram.normH);
+    for i = 1:numel(normHFields)
+        f = normHFields{i};
+        if ~isfield(options.magnetsHistogram.normH, f)
+            options.magnetsHistogram.normH.(f) = defaults.magnetsHistogram.normH.(f);
+        end
+    end
+
+    if ~isfield(options, 'normH') || ~isstruct(options.normH)
+        options.normH = options.magnetsHistogram.normH;
+    end
+
+    options.magnetsHistogram.bins = options.magnetsHistBins;
+    options.magnetsHistogram.stepPercent = options.magnetsStepPercent;
+    options.magnetsHistogram.br = options.magnetsBr;
 end
 
 % -------------------------------------------------------------------------
@@ -224,6 +371,15 @@ function run_magnets_exports(model, ds, folderPath, modelName, options, logFn)
     magnets3dTxtPath = fullfile(folderPath, sprintf('Magnets_%s_%s.txt', safeName, modelName));
     magnetsHistTxtPath = fullfile(folderPath, sprintf('Magnets_histogram_%s_%s.txt', safeName, modelName));
     magnetsHistPngPath = fullfile(folderPath, sprintf('Magnets_histogram_%s_%s.png', safeName, modelName));
+    magnetsHistNormHTxtPath = fullfile(folderPath, sprintf('Magnets_histogram_normH_%s_%s.txt', safeName, modelName));
+    magnetsHistNormHPngPath = fullfile(folderPath, sprintf('Magnets_histogram_normH_%s_%s.png', safeName, modelName));
+
+    normMEnabled = true;
+    normHEnabled = false;
+    if isstruct(options.magnetsHistogram)
+        normMEnabled = logical(options.magnetsHistogram.normMEnabled);
+        normHEnabled = logical(options.magnetsHistogram.normHEnabled);
+    end
 
     if options.enableMagnets3DPlot
         ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
@@ -241,25 +397,46 @@ function run_magnets_exports(model, ds, folderPath, modelName, options, logFn)
         end
     end
 
-    if options.enableMagnetsHistogram
+    if options.enableMagnetsHistogram && (normMEnabled || normHEnabled)
         ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
         logFn('INFO', ts, ds.tag, sprintf('Iniciando exportación Magnets Histogram (bins=%d)...', options.magnetsHistBins));
         try
-            export_magnets_histogram(model, ds.tag, magnetsHistTxtPath, magnetsHistPngPath, options.magnetsHistBins);
-            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
-            logFn('INFO', ts, ds.tag, sprintf('Magnets Histogram exportado (PNG y TXT, bins=%d).', options.magnetsHistBins));
+            if normMEnabled
+                export_magnets_histogram(model, ds.tag, magnetsHistTxtPath, magnetsHistPngPath, options.magnetsHistBins);
+                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                logFn('INFO', ts, ds.tag, sprintf('Magnets Histogram normM exportado (PNG y TXT, bins=%d).', options.magnetsHistBins));
 
-            try
-                run_magnets_python_postprocess(magnetsHistTxtPath, modelName, ds.shortLabel, options.magnetsBr, options.magnetsStepPercent);
+                try
+                    run_magnets_python_postprocess(magnetsHistTxtPath, modelName, ds.shortLabel, options.magnetsBr, options.magnetsStepPercent);
+                    ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                    logFn('INFO', ts, ds.tag, sprintf('Postproceso Magnets Python completado (Br=%.6g T, step=%.6g%%).', ...
+                        options.magnetsBr, options.magnetsStepPercent));
+                catch postErr
+                    ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                    logFn('WARN', ts, ds.tag, ['Postproceso Magnets no ejecutado: ' compact_python_error(postErr.message)]);
+                    ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                    logFn('WARN', ts, ds.tag, ...
+                        'Instala dependencias en el entorno Linux: python3 -m pip install --user numpy matplotlib');
+                end
+            end
+
+            if normHEnabled
+                export_magnets_histogram(model, ds.tag, magnetsHistNormHTxtPath, magnetsHistNormHPngPath, ...
+                    options.magnetsHistBins, 'mfnc.normH', 'kA/m');
                 ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
-                logFn('INFO', ts, ds.tag, sprintf('Postproceso Magnets Python completado (Br=%.6g T, step=%.6g%%).', ...
-                    options.magnetsBr, options.magnetsStepPercent));
-            catch postErr
-                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
-                logFn('WARN', ts, ds.tag, ['Postproceso Magnets no ejecutado: ' compact_python_error(postErr.message)]);
-                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
-                logFn('WARN', ts, ds.tag, ...
-                    'Instala dependencias en el entorno Linux: python3 -m pip install --user numpy matplotlib');
+                logFn('INFO', ts, ds.tag, sprintf('Magnets Histogram normH exportado (PNG y TXT, bins=%d).', options.magnetsHistBins));
+
+                try
+                    run_magnets_h_python_postprocess(magnetsHistNormHTxtPath, options.normH);
+                    ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                    logFn('INFO', ts, ds.tag, 'Postproceso Magnets normH Python completado.');
+                catch postErr
+                    ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                    logFn('WARN', ts, ds.tag, ['Postproceso Magnets normH no ejecutado: ' compact_python_error(postErr.message)]);
+                    ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                    logFn('WARN', ts, ds.tag, ...
+                        'Instala dependencias en el entorno Linux: python3 -m pip install --user numpy matplotlib');
+                end
             end
         catch err
             if is_not_connected_error(err)
@@ -268,6 +445,9 @@ function run_magnets_exports(model, ds, folderPath, modelName, options, logFn)
             ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
             logFn('WARN', ts, ds.tag, ['Magnets Histogram no se pudo exportar: ' err.message]);
         end
+    elseif options.enableMagnetsHistogram
+        ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+        logFn('WARN', ts, ds.tag, 'Magnets Histogram habilitado pero sin selección de normM/normH.');
     end
 end
 
@@ -452,6 +632,143 @@ function run_magnets_python_postprocess(magnetsTxtPath, magnetInfo, analysisName
     end
 
     error('Fallo ejecutando postproceso Python Magnets: %s', strjoin(errors, ' | '));
+end
+
+% -------------------------------------------------------------------------
+function run_magnets_h_python_postprocess(magnetsTxtPath, normHOptions)
+    if nargin < 2 || ~isstruct(normHOptions)
+        normHOptions = struct();
+    end
+
+    scriptPath = fullfile(fileparts(mfilename('fullpath')), ...
+        'Histogram_H_Postprocess.py');
+
+    if ~isfile(scriptPath)
+        error('No se encontro script Python de postproceso normH: %s', scriptPath);
+    end
+
+    [txtDir, txtName, ~] = fileparts(magnetsTxtPath);
+    outputPng = fullfile(txtDir, [txtName '_Hfield.png']);
+
+    [txtPathForPython, outputPngForPython, cleanupFolder] = prepare_python_temp_io(magnetsTxtPath, outputPng);
+    cleanupObj = onCleanup(@() cleanup_temp_folder(cleanupFolder)); %#ok<NASGU>
+
+    args = [...
+        ' --file-path '  q(txtPathForPython), ...
+        ' --output-png ' q(outputPngForPython), ...
+        build_optional_h_arg('Hlinear_end', get_struct_field(normHOptions, 'Hlinear_end', [])), ...
+        build_optional_h_arg('Hknee', get_struct_field(normHOptions, 'Hknee', [])), ...
+        build_optional_h_arg('Hcb', get_struct_field(normHOptions, 'Hcb', [])), ...
+        build_optional_h_arg('Hcj', get_struct_field(normHOptions, 'Hcj', [])), ...
+        build_extra_h_args(get_struct_field(normHOptions, 'extraH', struct('name', {}, 'value', {}))), ...
+        ' --no-show'];
+
+    pyCandidates = get_python_command_candidates();
+    errors = {};
+
+    for i = 1:numel(pyCandidates)
+        cmd = [pyCandidates{i} ' ' q(scriptPath) args];
+        [status, out] = system(cmd);
+        if status == 0
+            if ~strcmp(outputPngForPython, outputPng)
+                [okCopy, copyMsg] = copyfile(outputPngForPython, outputPng, 'f');
+                if ~okCopy
+                    error('PNG generado por Python, pero no se pudo copiar al destino final: %s', copyMsg);
+                end
+            end
+            return;
+        end
+        errors{end+1} = sprintf('%s: %s', pyCandidates{i}, strtrim(out)); %#ok<AGROW>
+    end
+
+    error('Fallo ejecutando postproceso Python Magnets normH: %s', strjoin(errors, ' | '));
+end
+
+% -------------------------------------------------------------------------
+function value = get_struct_field(s, fieldName, defaultValue)
+    value = defaultValue;
+    if isstruct(s) && isfield(s, fieldName)
+        value = s.(fieldName);
+    end
+end
+
+% -------------------------------------------------------------------------
+function arg = build_optional_h_arg(flagName, value)
+    arg = '';
+    if isempty(value)
+        return;
+    end
+
+    if ischar(value) || isstring(value)
+        candidate = str2double(char(value));
+    else
+        candidate = double(value);
+    end
+
+    if ~isfinite(candidate)
+        return;
+    end
+
+    arg = [' --' flagName ' ' q(num2str(candidate, '%.15g'))];
+end
+
+% -------------------------------------------------------------------------
+function args = build_extra_h_args(extraH)
+    args = '';
+    if isempty(extraH)
+        return;
+    end
+
+    if isstruct(extraH)
+        for idx = 1:numel(extraH)
+            name = strtrim(char(string(get_struct_field(extraH(idx), 'name', ''))));
+            value = get_struct_field(extraH(idx), 'value', []);
+            token = build_single_extra_h_arg(name, value);
+            if ~isempty(token)
+                args = [args token]; %#ok<AGROW>
+            end
+        end
+        return;
+    end
+
+    if iscell(extraH)
+        for idx = 1:numel(extraH)
+            item = extraH{idx};
+            if isstruct(item)
+                name = strtrim(char(string(get_struct_field(item, 'name', ''))));
+                value = get_struct_field(item, 'value', []);
+            elseif iscell(item) && numel(item) >= 2
+                name = strtrim(char(string(item{1})));
+                value = item{2};
+            else
+                continue;
+            end
+            token = build_single_extra_h_arg(name, value);
+            if ~isempty(token)
+                args = [args token]; %#ok<AGROW>
+            end
+        end
+    end
+end
+
+% -------------------------------------------------------------------------
+function arg = build_single_extra_h_arg(name, value)
+    arg = '';
+    if isempty(name)
+        return;
+    end
+
+    if ischar(value) || isstring(value)
+        candidate = str2double(char(value));
+    else
+        candidate = double(value);
+    end
+
+    if ~isfinite(candidate)
+        return;
+    end
+
+    arg = [' --extra ' q([char(name) '=' num2str(candidate, '%.15g')])];
 end
 
 % -------------------------------------------------------------------------

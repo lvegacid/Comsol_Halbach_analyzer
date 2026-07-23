@@ -11,12 +11,18 @@
 %
 % Lanza:
 %   MException con identifier 'ComsolAnalyzer:exportMagnetsHistogram'
-function export_magnets_histogram(model, datasetTag, outputPath, pngPath, nBins)
+function export_magnets_histogram(model, datasetTag, outputPath, pngPath, nBins, expr, unit)
     if nargin < 4
         pngPath = '';
     end
     if nargin < 5 || isempty(nBins)
         nBins = 100;
+    end
+    if nargin < 6 || isempty(expr)
+        expr = 'mu0_const*mfnc.normM';
+    end
+    if nargin < 7 || isempty(unit)
+        unit = 'T';
     end
 
     nBins = floor(double(nBins));
@@ -54,8 +60,8 @@ function export_magnets_histogram(model, datasetTag, outputPath, pngPath, nBins)
         model.result(pg1dTag).feature('hist1').set('markerpos', 'datapoints');
         model.result(pg1dTag).feature('hist1').set('linewidth', 'preference');
         model.result(pg1dTag).feature('hist1').set('evaluationsettings', 'parent');
-        model.result(pg1dTag).feature('hist1').set('expr', 'mu0_const*mfnc.normM');
-        model.result(pg1dTag).feature('hist1').set('unit', 'T');
+        model.result(pg1dTag).feature('hist1').set('expr', expr);
+        model.result(pg1dTag).feature('hist1').set('unit', unit);
         model.result(pg1dTag).feature('hist1').set('number', nBins);
         model.result(pg1dTag).feature('hist1').set('function', 'discrete');
         model.result(pg1dTag).run;

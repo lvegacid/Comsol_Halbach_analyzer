@@ -216,16 +216,15 @@ class ReportService:
 
         entries.append((0, "3. Simulation B_field results", "simulation-bfield-results"))
 
-        fov_label = self._preferred_bfield_label(payload.studies, payload.summary_labels)
-        if fov_label:
-            fov_anchor = self._label_anchor(fov_label)
-            entries.append((1, f"3.1 {fov_label}", fov_anchor))
-            entries.append((2, "3.1.1 Table summary", f"{fov_anchor}-table"))
-            entries.append((2, "3.1.2 Plots", f"{fov_anchor}-plots"))
+        bfield_labels = self._selected_bfield_labels(payload.studies, payload.summary_labels)
+        for label_index, label in enumerate(bfield_labels, start=1):
+            label_anchor = self._label_anchor(label)
+            section_number = f"3.{label_index}"
+            entries.append((1, f"{section_number} {label}", label_anchor))
+            entries.append((2, f"{section_number}.1 Table summary", f"{label_anchor}-table"))
+            entries.append((2, f"{section_number}.2 Plots", f"{label_anchor}-plots"))
             for study_index, study in enumerate(payload.studies, start=1):
-                entries.append((3, f"3.1.2.{study_index} {study.folder_name}", f"{fov_anchor}-plots-{study_index}"))
-        else:
-            entries.append((1, "3.1 FOV", "simulation-bfield-results"))
+                entries.append((3, f"{section_number}.2.{study_index} {study.folder_name}", f"{label_anchor}-plots-{study_index}"))
 
         entries.append((0, "4. Simulation Magnet results", "simulation-magnet-results"))
         entries.append((1, "4.1 Table summary", "simulation-magnet-results-table"))
@@ -252,27 +251,29 @@ class ReportService:
             story.append(Paragraph(f"Path: {escape(parent_path)}", self.cell))
             story.append(Spacer(1, 0.1 * cm))
 
-        fov_label = self._preferred_bfield_label(studies, selected_labels)
-        if not fov_label:
+        bfield_labels = self._selected_bfield_labels(studies, selected_labels)
+        if not bfield_labels:
             story.append(Paragraph("No selected FOV histogram label available for the chosen studies.", self.normal))
             return
 
-        label_anchor = self._label_anchor(fov_label)
-        story.append(Spacer(1, 0.2 * cm))
-        story.append(self._anchored_heading(label_anchor, fov_label, self.h2))
-        comment = label_comments.get(fov_label, "").strip()
-        if comment:
-            story.append(Paragraph(f'Details: "{escape(comment)}"', self.cell))
-        expected_ppm = label_expected_ppms.get(fov_label, "").strip()
-        if expected_ppm:
-            story.append(Paragraph(f'Expected ppms: {escape(expected_ppm)}', self.cell))
+        for label_index, label in enumerate(bfield_labels, start=1):
+            section_number = f"3.{label_index}"
+            label_anchor = self._label_anchor(label)
+            story.append(Spacer(1, 0.2 * cm))
+            story.append(self._anchored_heading(label_anchor, f"{section_number} {label}", self.h2))
+            comment = label_comments.get(label, "").strip()
+            if comment:
+                story.append(Paragraph(f'Details: "{escape(comment)}"', self.cell))
+            expected_ppm = label_expected_ppms.get(label, "").strip()
+            if expected_ppm:
+                story.append(Paragraph(f'Expected ppms: {escape(expected_ppm)}', self.cell))
 
-        story.append(self._anchored_heading(f"{label_anchor}-table", "Table summary", self.h3))
-        table = self._build_summary_table_for_label(studies, fov_label, selected_parameters)
-        story.append(table)
+            story.append(self._anchored_heading(f"{label_anchor}-table", f"{section_number}.1 Table summary", self.h3))
+            table = self._build_summary_table_for_label(studies, label, selected_parameters)
+            story.append(table)
 
-        story.append(self._anchored_heading(f"{label_anchor}-plots", "Plots", self.h3))
-        self._append_bfield_label_plots(story, studies, fov_label)
+            story.append(self._anchored_heading(f"{label_anchor}-plots", f"{section_number}.2 Plots", self.h3))
+            self._append_bfield_label_plots(story, studies, label, section_number)
 
     def _append_magnet_results(self, story: list, studies: list[SimulationStudyResult], selected_parameters: list[str]) -> None:
         story.append(self._anchored_heading("simulation-magnet-results", "Simulation Magnet results", self.h1))
@@ -302,7 +303,6 @@ class ReportService:
             else:
                 story.append(Paragraph("Material used: N/A", self.cell))
 
-            story.append(self._anchored_heading(f"{self._bh_study_anchor(study.folder_name)}-material", f"Material: {material_name or 'N/A'}", self.h3))
             self._append_material_details(story, material, heading="BH curve")
             story.append(Spacer(1, 0.1 * cm))
 
@@ -500,14 +500,14 @@ class ReportService:
             return b, 0.0
         return 0.0, 0.0
 
-    def _append_bfield_label_plots(self, story: list, studies: list[SimulationStudyResult], label: str) -> None:
+    def _append_bfield_label_plots(self, story: list, studies: list[SimulationStudyResult], label: str, section_number: str) -> None:
         found = False
         for study_index, study in enumerate(studies, start=1):
             domain = next((domain for domain in study.domains if domain.name == label), None)
             if domain is None:
                 continue
             found = True
-            story.append(self._anchored_heading(f"{self._label_anchor(label)}-plots-{study_index}", study.folder_name, self.study_title))
+            story.append(self._anchored_heading(f"{self._label_anchor(label)}-plots-{study_index}", f"{section_number}.2.{study_index} {study.folder_name}", self.h3))
             self._append_domain_pair(story, domain.plot_3d, domain.histogram)
             self._append_projection_row_pdf(story, domain.projection_xy, domain.projection_yz, domain.projection_xz)
             self._append_optional_image(story, "Custom Coordinates", domain.custom_coordinates)
@@ -560,6 +560,13 @@ class ReportService:
             if low in {"fov", "b_fov", "bfov"}:
                 return candidate
         return labels[0]
+
+    @staticmethod
+    def _selected_bfield_labels(studies: list[SimulationStudyResult], selected_labels: list[str]) -> list[str]:
+        labels = sorted({label for study in studies for label in study.histogram_metrics.keys()})
+        if selected_labels:
+            labels = [label for label in selected_labels if label in labels]
+        return list(dict.fromkeys(labels))
 
     def _find_geometry_images(self, studies: list[SimulationStudyResult]) -> list[Path]:
         geometry: list[Path] = []
@@ -674,16 +681,13 @@ class ReportService:
         if left is None and right is None:
             return
 
-        if left is not None and right is not None:
-            table = Table([[left, right]], colWidths=[8.1 * cm, 8.1 * cm])
-            table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
-            story.append(table)
-            story.append(Spacer(1, 0.15 * cm))
-            return
+        if left is None:
+            left = [Paragraph("3D Plot", self.normal), Spacer(1, 0.08 * cm), Paragraph("Not available", self.cell)]
+        if right is None:
+            right = [Paragraph("Histogram", self.normal), Spacer(1, 0.08 * cm), Paragraph("Not available", self.cell)]
 
-        single = left if left is not None else right
-        table = Table([[single]], colWidths=[16.2 * cm])
-        table.setStyle(TableStyle([("ALIGN", (0, 0), (0, 0), "CENTER"), ("VALIGN", (0, 0), (0, 0), "TOP")]))
+        table = Table([[left, right]], colWidths=[8.1 * cm, 8.1 * cm])
+        table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
         story.append(table)
         story.append(Spacer(1, 0.15 * cm))
 
@@ -830,21 +834,11 @@ class ReportService:
         cells = []
         for title, path in ordered:
             cell = self._build_image_cell(title, path, max_width_cm=4.7, max_height_cm=3.6)
-            if cell is not None:
-                cells.append(cell)
+            if cell is None:
+                cell = [Paragraph(title, self.normal), Spacer(1, 0.08 * cm), Paragraph("Not available", self.cell)]
+            cells.append(cell)
 
-        if not cells:
-            return
-
-        if len(cells) == 1:
-            table = Table([[cells[0]]], colWidths=[16.2 * cm])
-            table.setStyle(TableStyle([("ALIGN", (0, 0), (0, 0), "CENTER"), ("VALIGN", (0, 0), (0, 0), "TOP")]))
-            story.append(table)
-            story.append(Spacer(1, 0.15 * cm))
-            return
-
-        col_width = 16.2 * cm / len(cells)
-        table = Table([cells], colWidths=[col_width] * len(cells))
+        table = Table([cells], colWidths=[5.4 * cm, 5.4 * cm, 5.4 * cm])
         table.setStyle(
             TableStyle(
                 [
@@ -929,13 +923,18 @@ class ReportService:
 
         lines.append("- [3. Simulation B_field results](#3-simulation-b_field-results)")
 
-        fov_label = self._preferred_bfield_label(payload.studies, payload.summary_labels)
-        if fov_label:
-            lines.append(f"- [3.1 {fov_label}](#31-{self._slug(fov_label)})")
-            lines.append("- [3.1.1 Table summary](#311-table-summary)")
-            lines.append("- [3.1.2 Plots](#312-plots)")
+        bfield_labels = self._selected_bfield_labels(payload.studies, payload.summary_labels)
+        for label_index, label in enumerate(bfield_labels, start=1):
+            section_number = f"3.{label_index}"
+            section_slug = section_number.replace(".", "")
+            lines.append(f"- [{section_number} {label}](#{section_slug}-{self._slug(label)})")
+            lines.append(f"- [{section_number}.1 Table summary](#{section_slug}1-table-summary)")
+            lines.append(f"- [{section_number}.2 Plots](#{section_slug}2-plots)")
             for study_index, study in enumerate(payload.studies, start=1):
-                lines.append(f"- [3.1.2.{study_index} {study.folder_name}](#312{study_index}-{self._slug(study.folder_name)})")
+                lines.append(
+                    f"- [{section_number}.2.{study_index} {study.folder_name}]"
+                    f"(#{section_slug}2{study_index}-{self._slug(study.folder_name)})"
+                )
 
         lines.append("- [4. Simulation Magnet results](#4-simulation-magnet-results)")
         lines.append("- [4.1 Table summary](#41-table-summary)")
@@ -993,8 +992,6 @@ class ReportService:
             lines.append(f"### {study.folder_name}")
             material = study.material_curve
             material_name = material.name if material is not None and material.name else study.material_name
-            lines.append(f"#### Material: {material_name or 'N/A'}")
-            lines.append("")
             lines.append(f"Material used: {self._escape_md(material_name or 'N/A')}")
             lines.append("")
             lines.extend(self._build_markdown_material_details(material, out_path))
@@ -1037,25 +1034,27 @@ class ReportService:
             lines.append(f"Path: {self._escape_md(parent_path)}")
             lines.append("")
 
-        fov_label = self._preferred_bfield_label(studies, selected_labels)
-        if not fov_label:
+        bfield_labels = self._selected_bfield_labels(studies, selected_labels)
+        if not bfield_labels:
             lines.append("No selected FOV histogram label available for the chosen studies.")
             return lines
 
-        lines.append(f"### 3.1 {fov_label}")
-        comment = label_comments.get(fov_label, "").strip()
-        if comment:
-            lines.append(f"Details: \"{self._escape_md(comment)}\"")
-        expected_ppm = label_expected_ppms.get(fov_label, "").strip()
-        if expected_ppm:
-            lines.append(f"Expected ppms: {self._escape_md(expected_ppm)}")
-        lines.append("")
-        lines.append("#### 3.1.1 Table summary")
-        lines.extend(self._build_markdown_summary_table(studies, fov_label, selected_parameters))
-        lines.append("")
-        lines.append("#### 3.1.2 Plots")
-        lines.extend(self._build_markdown_bfield_plots(studies, fov_label, out_path))
-        lines.append("")
+        for label_index, label in enumerate(bfield_labels, start=1):
+            section_number = f"3.{label_index}"
+            lines.append(f"### {section_number} {label}")
+            comment = label_comments.get(label, "").strip()
+            if comment:
+                lines.append(f"Details: \"{self._escape_md(comment)}\"")
+            expected_ppm = label_expected_ppms.get(label, "").strip()
+            if expected_ppm:
+                lines.append(f"Expected ppms: {self._escape_md(expected_ppm)}")
+            lines.append("")
+            lines.append(f"#### {section_number}.1 Table summary")
+            lines.extend(self._build_markdown_summary_table(studies, label, selected_parameters))
+            lines.append("")
+            lines.append(f"#### {section_number}.2 Plots")
+            lines.extend(self._build_markdown_bfield_plots(studies, label, out_path, section_number))
+            lines.append("")
         return lines
 
     def _build_markdown_summary_table(self, studies: list[SimulationStudyResult], label: str, selected_parameters: list[str]) -> list[str]:
@@ -1094,7 +1093,7 @@ class ReportService:
             lines.append("| " + " | ".join(khz_row) + " |")
         return lines
 
-    def _build_markdown_bfield_plots(self, studies: list[SimulationStudyResult], label: str, out_path: Path) -> list[str]:
+    def _build_markdown_bfield_plots(self, studies: list[SimulationStudyResult], label: str, out_path: Path, section_number: str) -> list[str]:
         lines: list[str] = []
         found = False
         for study in studies:
@@ -1102,12 +1101,14 @@ class ReportService:
             if domain is None:
                 continue
             found = True
-            lines.append(f"{study.folder_name}")
+            plot_index = len([line for line in lines if line.startswith("##### ")]) + 1
+            lines.append(f"##### {section_number}.2.{plot_index} {study.folder_name}")
             lines.extend(
                 self._md_image_grid(
                     [("3D Plot", domain.plot_3d, ""), ("Histogram", domain.histogram, "")],
                     out_path,
                     columns=2,
+                    keep_placeholders=True,
                 )
             )
             lines.extend(
@@ -1115,6 +1116,7 @@ class ReportService:
                     [("XY", domain.projection_xy, ""), ("YZ", domain.projection_yz, ""), ("XZ", domain.projection_xz, "")],
                     out_path,
                     columns=3,
+                    keep_placeholders=True,
                 )
             )
             if domain.custom_coordinates:
@@ -1160,13 +1162,23 @@ class ReportService:
             lines.append("| " + " | ".join(self._escape_md(value) for value in row) + " |")
         return lines
 
-    def _md_image_grid(self, entries: list[tuple[str | None, str | None, str]], out_path: Path, columns: int) -> list[str]:
+    def _md_image_grid(
+        self,
+        entries: list[tuple[str | None, str | None, str]],
+        out_path: Path,
+        columns: int,
+        keep_placeholders: bool = False,
+    ) -> list[str]:
         valid: list[tuple[str, str, str]] = []
         for title, path, caption in entries:
             if not path:
+                if keep_placeholders:
+                    valid.append((title or "", "", "Not available"))
                 continue
             p = Path(path)
             if not p.exists():
+                if keep_placeholders:
+                    valid.append((title or "", "", "Not available"))
                 continue
             valid.append((title or "", self._md_image_path(p, out_path), caption))
 
@@ -1177,7 +1189,12 @@ class ReportService:
         for title, image_ref, caption in valid:
             title_html = f"<div><strong>{escape(title)}</strong></div>" if title else ""
             caption_html = f"<div>{escape(caption)}</div>" if caption else ""
-            cells.append(f"<td align=\"center\" valign=\"top\">{title_html}<img src=\"{escape(image_ref, quote=True)}\" style=\"max-width:100%; height:auto;\"/>{caption_html}</td>")
+            image_html = (
+                f"<img src=\"{escape(image_ref, quote=True)}\" style=\"max-width:100%; height:auto;\"/>"
+                if image_ref
+                else ""
+            )
+            cells.append(f"<td align=\"center\" valign=\"top\">{title_html}{image_html}{caption_html}</td>")
 
         row_cells = cells[:columns]
         lines = ["<table><tr>" + "".join(row_cells) + "</tr></table>"]

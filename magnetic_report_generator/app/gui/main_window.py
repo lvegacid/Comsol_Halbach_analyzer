@@ -82,6 +82,7 @@ class MainWindow(QMainWindow):
         self.tab_generate.upload_to_notion_clicked.connect(self.on_upload_to_notion)
         self.tab_generate.browse_folder_clicked.connect(self.on_browse_export_folder)
         self.tab_generate.summary_rows_changed.connect(self.on_summary_rows_changed)
+        self.tab_generate.summary_labels_changed.connect(self.on_summary_labels_changed)
 
         if self._settings.last_summary_rows is not None:
             self.tab_generate.set_selected_parameters(self._settings.last_summary_rows)
@@ -89,6 +90,7 @@ class MainWindow(QMainWindow):
         self._apply_style()
         self._refresh_export_defaults()
         self._refresh_available_labels()
+        self._restore_summary_label_metadata()
 
     def closeEvent(self, event) -> None:
         self._settings.comsol_version = self.tab_magnet.comsol_edit.text().strip() or "6.4"
@@ -99,6 +101,8 @@ class MainWindow(QMainWindow):
         self._settings.last_expected_ppm = self.tab_magnet.expected_ppm_edit.text().strip()
         self._settings.last_other_information = self.tab_magnet.other_info_edit.toPlainText().strip()
         self._settings.last_summary_rows = self.tab_generate.selected_parameters()
+        self._settings.last_summary_label_comments = self.tab_generate.selected_label_comments()
+        self._settings.last_summary_label_expected_ppms = self.tab_generate.selected_label_expected_ppms()
         if self.tab_generate.output_folder():
             self._settings.last_pdf_export_path = str(Path(self.tab_generate.output_folder()) / self.tab_generate.output_name())
         self._settings_service.save_settings(self._settings)
@@ -118,6 +122,7 @@ class MainWindow(QMainWindow):
 
     def on_studies_or_materials_changed(self) -> None:
         self._refresh_available_labels()
+        self._restore_summary_label_metadata()
 
     def _collect_study_results(self) -> list[SimulationStudyResult]:
         selected_configs = self.tab_sim.get_selected_studies()
@@ -193,6 +198,11 @@ class MainWindow(QMainWindow):
         self._settings.last_summary_rows = list(selected_rows)
         self._settings_service.save_settings(self._settings)
 
+    def on_summary_labels_changed(self) -> None:
+        self._settings.last_summary_label_comments = self.tab_generate.selected_label_comments()
+        self._settings.last_summary_label_expected_ppms = self.tab_generate.selected_label_expected_ppms()
+        self._settings_service.save_settings(self._settings)
+
     def on_browse_export_folder(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Select Export Folder", self.tab_generate.output_folder())
         if not path:
@@ -217,6 +227,12 @@ class MainWindow(QMainWindow):
         labels = sorted({label for study in studies for label in study.histogram_metrics.keys()})
         self.tab_generate.set_available_labels(labels)
         self.tab_generate.set_status("Ready" if labels or studies else "No studies selected")
+
+    def _restore_summary_label_metadata(self) -> None:
+        self.tab_generate.set_label_metadata(
+            self._settings.last_summary_label_comments,
+            self._settings.last_summary_label_expected_ppms,
+        )
 
     def _build_current_payload(self, target_path: Path, output_format: str) -> ReportPayload:
         studies = self._collect_study_results()

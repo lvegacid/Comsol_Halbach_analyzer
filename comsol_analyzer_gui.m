@@ -714,6 +714,7 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         options.enableCustomCoordinates = logical(chkBfovCoord.Value);
         options.enableMagnets3DPlot = logical(chkMagnets3D.Value);
         options.enableMagnetsHistogram = logical(chkMagnetsHist.Value);
+        options.connectionRecoveryFn = @recoverLiveLinkAndReloadModel;
         options.projectionOrthoScale = getpref('ComsolAnalyzer', 'ProjectionOrthoScale', 0.35);
         options.domainMode = false;
         options.domainSelections = struct('tag', {}, 'label', {});
@@ -780,19 +781,35 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         end
 
         if options.enableMagnetsHistogram
-            [okMagnetsCfg, magnetsHistBins, magnetsStepPercent, magnetsBr] = ask_magnets_histogram_config();
+            [okMagnetsCfg, magnetsCfg] = ask_magnets_histogram_config();
             if ~okMagnetsCfg
                 ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
                 appendLog('INFO', ts, '', 'Extracción cancelada por el usuario (configuración de Magnets histogram).');
                 return;
             end
-            options.magnetsHistBins = magnetsHistBins;
-            options.magnetsStepPercent = magnetsStepPercent;
-            options.magnetsBr = magnetsBr;
+            options.magnetsHistogram = magnetsCfg;
+            options.magnetsHistBins = magnetsCfg.bins;
+            options.magnetsStepPercent = magnetsCfg.stepPercent;
+            options.magnetsBr = magnetsCfg.br;
+            options.normH = magnetsCfg.normH;
         else
+            options.magnetsHistogram = struct(...
+                'bins', getpref('ComsolAnalyzer', 'MagnetsHistogramBins', 100), ...
+                'stepPercent', getpref('ComsolAnalyzer', 'MagnetsHistogramStepPercent', 2), ...
+                'br', getpref('ComsolAnalyzer', 'MagnetsHistogramBr', 1.4), ...
+                'normMEnabled', true, ...
+                'normHEnabled', false, ...
+                'normH', struct(...
+                    'enabled', false, ...
+                    'Hcb', [], ...
+                    'Hcj', [], ...
+                    'Hknee', [], ...
+                    'Hlinear_end', [], ...
+                    'extraH', struct('name', {}, 'value', {})));
             options.magnetsHistBins = getpref('ComsolAnalyzer', 'MagnetsHistogramBins', 100);
             options.magnetsStepPercent = getpref('ComsolAnalyzer', 'MagnetsHistogramStepPercent', 2);
             options.magnetsBr = getpref('ComsolAnalyzer', 'MagnetsHistogramBr', 1.4);
+            options.normH = options.magnetsHistogram.normH;
         end
 
         % Deshabilitar Run durante la extracción
@@ -914,6 +931,42 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
             appendLog('INFO', ts, '', sprintf('  Directorio:     %s', simulationRoot));
             appendLog('INFO', ts, '', sprintf('  Tiempo total:   %s', formatElapsedTime(toc(startedAt))));
         catch err
+            if is_not_connected_runtime_error(err)
+                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                appendLog('WARN', ts, '', ...
+                    'LiveLink se desconecto durante Geometry plots. Intentando reconexion y recarga de modelo...');
+
+                recovery = recoverLiveLinkAndReloadModel();
+                if recovery.connected
+                    try
+                        mdl = recovery.model;
+                        simulationRoot = fullfile(outputDir, 'Simulation_results');
+                        export_geometry_plots(mdl, simulationRoot, geomCfg.hideSelections);
+
+                        ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                        appendLog('INFO', ts, '', ...
+                            'Geometry plots completados tras reconexion LiveLink y recarga del modelo.');
+                        appendLog('INFO', ts, '', '--- Resumen Geometry plots ---');
+                        appendLog('INFO', ts, '', sprintf('  Directorio:     %s', simulationRoot));
+                        appendLog('INFO', ts, '', sprintf('  Tiempo total:   %s', formatElapsedTime(toc(startedAt))));
+                        stopExtractionHeartbeat(heartbeatTimer);
+                        return;
+                    catch retryErr
+                        stopExtractionHeartbeat(heartbeatTimer);
+                        ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                        appendLog('ERROR', ts, '', ...
+                            sprintf('Fallo Geometry plots tras reconexion: %s', retryErr.message));
+                        return;
+                    end
+                else
+                    ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                    appendLog('ERROR', ts, '', ...
+                        ['No se pudo recuperar LiveLink para Geometry plots. ' recovery.detail]);
+                    stopExtractionHeartbeat(heartbeatTimer);
+                    return;
+                end
+            end
+
             stopExtractionHeartbeat(heartbeatTimer);
             ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
             appendLog('ERROR', ts, '', ...
@@ -922,6 +975,77 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         end
 
         stopExtractionHeartbeat(heartbeatTimer);
+    end
+
+    function recovery = recoverLiveLinkAndReloadModel()
+        recovery = struct('connected', false, 'model', [], 'detail', '');
+
+        status = refreshConnectionStatus('connect', true);
+        if ~status.connected
+            recovery.detail = status.detail;
+            if isempty(strtrim(recovery.detail))
+                recovery.detail = status.message;
+            end
+            return;
+        end
+
+        mphPath = strtrim(mphField.Value);
+        if isempty(mphPath) || ~isfile(mphPath)
+            recovery.detail = 'No hay una ruta .mph valida para recargar el modelo.';
+            return;
+        end
+
+        try
+            mdl = load_model(mphPath);
+        catch err
+            recovery.detail = ['Conexion recuperada, pero fallo recarga de modelo: ' err.message];
+            return;
+        end
+
+        s = fig.UserData;
+        s.model = mdl;
+        fig.UserData = s;
+
+        recovery.connected = true;
+        recovery.model = mdl;
+        recovery.detail = '';
+    end
+
+    function tf = is_not_connected_runtime_error(err)
+        tf = false;
+        if isempty(err)
+            return;
+        end
+
+        msg = lower(err.message);
+        tf = contains(msg, 'not connected to a server') || ...
+             contains(msg, 'no conectado a un servidor') || ...
+             contains(msg, 'connection reset') || ...
+             contains(msg, 'connection timed out') || ...
+             contains(msg, 'connection refused') || ...
+             contains(msg, 'broken pipe') || ...
+             contains(msg, 'java.rmi');
+
+        if tf
+            return;
+        end
+
+        for idx = 1:numel(err.cause)
+            try
+                cmsg = lower(err.cause{idx}.message);
+                if contains(cmsg, 'not connected to a server') || ...
+                   contains(cmsg, 'no conectado a un servidor') || ...
+                   contains(cmsg, 'connection reset') || ...
+                   contains(cmsg, 'connection timed out') || ...
+                   contains(cmsg, 'connection refused') || ...
+                   contains(cmsg, 'broken pipe') || ...
+                   contains(cmsg, 'java.rmi')
+                    tf = true;
+                    return;
+                end
+            catch
+            end
+        end
     end
 
     function heartbeatTimer = startExtractionHeartbeat()
@@ -1619,42 +1743,308 @@ fig.SizeChangedFcn = @(~,~) layoutControls();
         end
     end
 
-    function [ok, bins, stepPercent, br] = ask_magnets_histogram_config()
+    function [ok, cfg] = ask_magnets_histogram_config()
         ok = false;
-        bins = getpref('ComsolAnalyzer', 'MagnetsHistogramBins', 100);
-        stepPercent = getpref('ComsolAnalyzer', 'MagnetsHistogramStepPercent', 2);
-        br = getpref('ComsolAnalyzer', 'MagnetsHistogramBr', 1.4);
 
-        answer = inputdlg({'Number of bins:', 'Step percent (%):', 'Br (Tesla):'}, ...
-            'Magnets Histogram', 1, {num2str(bins), num2str(stepPercent), num2str(br)});
-        if isempty(answer)
-            return;
+        defaultBins = getpref('ComsolAnalyzer', 'MagnetsHistogramBins', 100);
+        defaultStepPercent = getpref('ComsolAnalyzer', 'MagnetsHistogramStepPercent', 2);
+        defaultBr = getpref('ComsolAnalyzer', 'MagnetsHistogramBr', 1.4);
+
+        cfg = struct(...
+            'bins', defaultBins, ...
+            'stepPercent', defaultStepPercent, ...
+            'br', defaultBr, ...
+            'normMEnabled', true, ...
+            'normHEnabled', false, ...
+            'normH', struct(...
+                'enabled', false, ...
+                'Hcb', [], ...
+                'Hcj', [], ...
+                'Hknee', [], ...
+                'Hlinear_end', [], ...
+                'extraH', struct('name', {}, 'value', {})));
+
+        dlg = uifigure('Name', 'Magnets Histogram', ...
+            'Position', [280 140 560 560], ...
+            'WindowStyle', 'modal', ...
+            'Resize', 'off');
+        dlg.Tag = 'ComsolAnalyzerChildDialog';
+        registerChildDialog(dlg);
+
+        uilabel(dlg, 'Text', 'Magnets Histogram outputs:', ...
+            'Position', [20 522 220 22], 'FontWeight', 'bold');
+
+        chkNormM = uicheckbox(dlg, ...
+            'Text', 'normM', ...
+            'Position', [30 496 120 22], ...
+            'Value', true);
+
+        chkNormH = uicheckbox(dlg, ...
+            'Text', 'normH', ...
+            'Position', [160 496 120 22], ...
+            'Value', false);
+
+        uilabel(dlg, 'Text', 'Histogram bins (shared):', ...
+            'Position', [20 458 180 22], 'FontWeight', 'bold');
+        binsField = uieditfield(dlg, 'numeric', ...
+            'Position', [210 458 120 22], ...
+            'RoundFractionalValues', 'on', ...
+            'Limits', [1 Inf], ...
+            'LowerLimitInclusive', true, ...
+            'Value', defaultBins);
+
+        uilabel(dlg, 'Text', 'normM postprocess:', ...
+            'Position', [20 422 180 22], 'FontWeight', 'bold');
+        uilabel(dlg, 'Text', 'Step percent (%)', ...
+            'Position', [30 396 140 22]);
+        stepField = uieditfield(dlg, 'numeric', ...
+            'Position', [180 396 120 22], ...
+            'Limits', [eps Inf], ...
+            'LowerLimitInclusive', true, ...
+            'Value', defaultStepPercent);
+
+        uilabel(dlg, 'Text', 'Br (Tesla)', ...
+            'Position', [320 396 100 22]);
+        brField = uieditfield(dlg, 'numeric', ...
+            'Position', [420 396 120 22], ...
+            'Limits', [eps Inf], ...
+            'LowerLimitInclusive', true, ...
+            'Value', defaultBr);
+
+        uilabel(dlg, 'Text', 'normH thresholds (kA/m):', ...
+            'Position', [20 356 220 22], 'FontWeight', 'bold');
+
+        uilabel(dlg, 'Text', 'Hcb', 'Position', [30 332 120 22]);
+        hcbField = uieditfield(dlg, 'numeric', ...
+            'Position', [180 332 120 22], ...
+            'Value', 0);
+
+        uilabel(dlg, 'Text', 'Hcj', 'Position', [320 332 120 22]);
+        hcjField = uieditfield(dlg, 'numeric', ...
+            'Position', [420 332 120 22], ...
+            'Value', 0);
+
+        uilabel(dlg, 'Text', 'Hknee', 'Position', [30 302 120 22]);
+        hkneeField = uieditfield(dlg, 'numeric', ...
+            'Position', [180 302 120 22], ...
+            'Value', 0);
+
+        uilabel(dlg, 'Text', 'Hlinear_end', 'Position', [320 302 120 22]);
+        hlinearEndField = uieditfield(dlg, 'numeric', ...
+            'Position', [420 302 120 22], ...
+            'Value', 0);
+
+        uilabel(dlg, 'Text', 'Additional H values', ...
+            'Position', [20 266 220 22], 'FontWeight', 'bold');
+
+        extraTable = uitable(dlg, ...
+            'Position', [20 94 520 170], ...
+            'ColumnName', {'Name', 'Value (kA/m)'}, ...
+            'ColumnEditable', [true true], ...
+            'ColumnFormat', {'char', 'numeric'}, ...
+            'Data', cell(0, 2));
+
+        btnAddExtra = uibutton(dlg, 'push', ...
+            'Text', 'Add', ...
+            'Position', [20 64 80 24], ...
+            'ButtonPushedFcn', @on_add_extra);
+
+        btnRemoveExtra = uibutton(dlg, 'push', ...
+            'Text', 'Remove Last', ...
+            'Position', [110 64 100 24], ...
+            'ButtonPushedFcn', @on_remove_extra);
+
+        btnOk = uibutton(dlg, 'push', ...
+            'Text', 'OK', ...
+            'Position', [370 20 80 30], ...
+            'FontWeight', 'bold', ...
+            'ButtonPushedFcn', @on_ok);
+
+        btnCancel = uibutton(dlg, 'push', ...
+            'Text', 'Cancel', ...
+            'Position', [460 20 80 30], ...
+            'ButtonPushedFcn', @on_cancel);
+
+        chkNormM.ValueChangedFcn = @(~,~) update_mode_controls();
+        chkNormH.ValueChangedFcn = @(~,~) update_mode_controls();
+        dlg.CloseRequestFcn = @on_cancel;
+
+        update_mode_controls();
+        uiwait(dlg);
+
+        function update_mode_controls()
+            normMEnabled = logical(chkNormM.Value);
+            normHEnabled = logical(chkNormH.Value);
+
+            if normMEnabled
+                stepField.Enable = 'on';
+                brField.Enable = 'on';
+            else
+                stepField.Enable = 'off';
+                brField.Enable = 'off';
+            end
+
+            if normHEnabled
+                hcbField.Enable = 'on';
+                hcjField.Enable = 'on';
+                hkneeField.Enable = 'on';
+                hlinearEndField.Enable = 'on';
+                extraTable.Enable = 'on';
+                btnAddExtra.Enable = 'on';
+                btnRemoveExtra.Enable = 'on';
+            else
+                hcbField.Enable = 'off';
+                hcjField.Enable = 'off';
+                hkneeField.Enable = 'off';
+                hlinearEndField.Enable = 'off';
+                extraTable.Enable = 'off';
+                btnAddExtra.Enable = 'off';
+                btnRemoveExtra.Enable = 'off';
+            end
         end
 
-        binsValue = str2double(strtrim(answer{1}));
-        stepValue = str2double(strtrim(answer{2}));
-        brValue = str2double(strtrim(answer{3}));
-
-        if isnan(binsValue) || ~isfinite(binsValue) || binsValue < 1 || floor(binsValue) ~= binsValue
-            uialert(fig, 'El valor de bins debe ser un entero positivo.', 'Valor inválido');
-            return;
-        end
-        if isnan(stepValue) || ~isfinite(stepValue) || stepValue <= 0
-            uialert(fig, 'El valor de step_percent debe ser mayor a 0.', 'Valor inválido');
-            return;
-        end
-        if isnan(brValue) || ~isfinite(brValue) || brValue <= 0
-            uialert(fig, 'El valor de Br debe ser mayor a 0.', 'Valor inválido');
-            return;
+        function on_add_extra(~, ~)
+            data = extraTable.Data;
+            if isempty(data)
+                data = cell(1, 2);
+                data(1, :) = {'', NaN};
+            else
+                data(end+1, :) = {'', NaN}; %#ok<AGROW>
+            end
+            extraTable.Data = data;
         end
 
-        bins = floor(binsValue);
-        stepPercent = stepValue;
-        br = brValue;
-        setpref('ComsolAnalyzer', 'MagnetsHistogramBins', bins);
-        setpref('ComsolAnalyzer', 'MagnetsHistogramStepPercent', stepPercent);
-        setpref('ComsolAnalyzer', 'MagnetsHistogramBr', br);
-        ok = true;
+        function on_remove_extra(~, ~)
+            data = extraTable.Data;
+            if isempty(data)
+                return;
+            end
+            data(end, :) = [];
+            extraTable.Data = data;
+        end
+
+        function on_ok(~, ~)
+            normMEnabled = logical(chkNormM.Value);
+            normHEnabled = logical(chkNormH.Value);
+
+            if ~normMEnabled && ~normHEnabled
+                uialert(dlg, 'Selecciona al menos una salida: normM o normH.', 'Selección requerida');
+                return;
+            end
+
+            binsValue = double(binsField.Value);
+            if ~isfinite(binsValue) || binsValue < 1 || floor(binsValue) ~= binsValue
+                uialert(dlg, 'El valor de bins debe ser un entero positivo.', 'Valor inválido');
+                return;
+            end
+
+            stepValue = double(stepField.Value);
+            brValue = double(brField.Value);
+            if normMEnabled
+                if ~isfinite(stepValue) || stepValue <= 0
+                    uialert(dlg, 'El valor de step_percent debe ser mayor a 0.', 'Valor inválido');
+                    return;
+                end
+                if ~isfinite(brValue) || brValue <= 0
+                    uialert(dlg, 'El valor de Br debe ser mayor a 0.', 'Valor inválido');
+                    return;
+                end
+            end
+
+            hcbValue = [];
+            hcjValue = [];
+            hkneeValue = [];
+            hlinearEndValue = [];
+            extraH = struct('name', {}, 'value', {});
+
+            if normHEnabled
+                hcbValue = parse_required_threshold(hcbField.Value, 'Hcb');
+                if isempty(hcbValue); return; end
+                hcjValue = parse_required_threshold(hcjField.Value, 'Hcj');
+                if isempty(hcjValue); return; end
+                hkneeValue = parse_required_threshold(hkneeField.Value, 'Hknee');
+                if isempty(hkneeValue); return; end
+                hlinearEndValue = parse_required_threshold(hlinearEndField.Value, 'Hlinear_end');
+                if isempty(hlinearEndValue); return; end
+
+                extraData = extraTable.Data;
+                if ~isempty(extraData)
+                    for iRow = 1:size(extraData, 1)
+                        rowName = '';
+                        if size(extraData, 2) >= 1
+                            rowName = strtrim(char(string(extraData{iRow, 1})));
+                        end
+
+                        rowValue = NaN;
+                        if size(extraData, 2) >= 2
+                            rowValue = extraData{iRow, 2};
+                        end
+
+                        if isempty(rowName) && (isempty(rowValue) || (isnumeric(rowValue) && isnan(rowValue)))
+                            continue;
+                        end
+
+                        if isempty(rowName)
+                            uialert(dlg, sprintf('Fila %d en Additional H values: Name es obligatorio.', iRow), 'Fila inválida');
+                            return;
+                        end
+
+                        rowValueNum = str2double(strtrim(char(string(rowValue))));
+                        if ~isfinite(rowValueNum)
+                            uialert(dlg, sprintf('Fila %d en Additional H values: Value debe ser numérico.', iRow), 'Fila inválida');
+                            return;
+                        end
+
+                        extraH(end+1).name = rowName; %#ok<AGROW>
+                        extraH(end).value = rowValueNum;
+                    end
+                end
+            end
+
+            cfg = struct(...
+                'bins', floor(binsValue), ...
+                'stepPercent', stepValue, ...
+                'br', brValue, ...
+                'normMEnabled', normMEnabled, ...
+                'normHEnabled', normHEnabled, ...
+                'normH', struct(...
+                    'enabled', normHEnabled, ...
+                    'Hcb', hcbValue, ...
+                    'Hcj', hcjValue, ...
+                    'Hknee', hkneeValue, ...
+                    'Hlinear_end', hlinearEndValue, ...
+                    'extraH', extraH));
+
+            setpref('ComsolAnalyzer', 'MagnetsHistogramBins', cfg.bins);
+            setpref('ComsolAnalyzer', 'MagnetsHistogramStepPercent', cfg.stepPercent);
+            setpref('ComsolAnalyzer', 'MagnetsHistogramBr', cfg.br);
+
+            ok = true;
+            if isvalid(dlg)
+                uiresume(dlg);
+                unregisterChildDialog(dlg);
+                delete(dlg);
+            end
+        end
+
+        function value = parse_required_threshold(rawValue, fieldName)
+            value = [];
+            candidate = str2double(strtrim(char(string(rawValue))));
+            if ~isfinite(candidate)
+                uialert(dlg, sprintf('El valor de %s debe ser numérico (kA/m).', fieldName), 'Valor inválido');
+                return;
+            end
+            value = candidate;
+        end
+
+        function on_cancel(~, ~)
+            ok = false;
+            if isvalid(dlg)
+                uiresume(dlg);
+                unregisterChildDialog(dlg);
+                delete(dlg);
+            end
+        end
     end
 
     function [ok, projectionOrthoScale] = ask_projection_orthoscale()

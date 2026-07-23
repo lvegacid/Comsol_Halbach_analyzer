@@ -35,6 +35,7 @@ class GenerateTab(QWidget):
     upload_to_notion_clicked = Signal()
     browse_folder_clicked = Signal()
     summary_rows_changed = Signal(list)
+    summary_labels_changed = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -66,6 +67,7 @@ class GenerateTab(QWidget):
         self.labels_table.setHorizontalHeaderLabels(["Use", "Label", "Comment", "Expected ppms"])
         self.labels_table.horizontalHeader().setStretchLastSection(True)
         labels_root.addWidget(self.labels_table)
+        self.labels_table.itemChanged.connect(self._on_labels_item_changed)
         root.addWidget(labels_box, 1)
 
         parameters_box = QGroupBox("Summary Rows")
@@ -122,17 +124,40 @@ class GenerateTab(QWidget):
         previous = set(self.selected_labels())
         previous_comments = self.selected_label_comments()
         previous_expected_ppms = self.selected_label_expected_ppms()
-        self.labels_table.setRowCount(len(labels))
-        for row, label in enumerate(labels):
-            use_item = QTableWidgetItem()
-            use_item.setFlags(use_item.flags() | Qt.ItemIsUserCheckable)
-            use_item.setCheckState(Qt.Checked if not previous or label in previous else Qt.Unchecked)
-            self.labels_table.setItem(row, 0, use_item)
-            label_item = QTableWidgetItem(label)
-            label_item.setFlags(label_item.flags() & ~Qt.ItemIsEditable)
-            self.labels_table.setItem(row, 1, label_item)
-            self.labels_table.setItem(row, 2, QTableWidgetItem(previous_comments.get(label, "")))
-            self.labels_table.setItem(row, 3, QTableWidgetItem(previous_expected_ppms.get(label, "")))
+        self.labels_table.blockSignals(True)
+        try:
+            self.labels_table.setRowCount(len(labels))
+            for row, label in enumerate(labels):
+                use_item = QTableWidgetItem()
+                use_item.setFlags(use_item.flags() | Qt.ItemIsUserCheckable)
+                use_item.setCheckState(Qt.Checked if not previous or label in previous else Qt.Unchecked)
+                self.labels_table.setItem(row, 0, use_item)
+                label_item = QTableWidgetItem(label)
+                label_item.setFlags(label_item.flags() & ~Qt.ItemIsEditable)
+                self.labels_table.setItem(row, 1, label_item)
+                self.labels_table.setItem(row, 2, QTableWidgetItem(previous_comments.get(label, "")))
+                self.labels_table.setItem(row, 3, QTableWidgetItem(previous_expected_ppms.get(label, "")))
+        finally:
+            self.labels_table.blockSignals(False)
+
+    def set_label_metadata(self, comments: dict[str, str], expected_ppms: dict[str, str]) -> None:
+        self.labels_table.blockSignals(True)
+        try:
+            for row in range(self.labels_table.rowCount()):
+                label_item = self.labels_table.item(row, 1)
+                if label_item is None:
+                    continue
+                label = label_item.text().strip()
+                if not label:
+                    continue
+                comment_item = self.labels_table.item(row, 2)
+                expected_item = self.labels_table.item(row, 3)
+                if comment_item is not None:
+                    comment_item.setText(comments.get(label, ""))
+                if expected_item is not None:
+                    expected_item.setText(expected_ppms.get(label, ""))
+        finally:
+            self.labels_table.blockSignals(False)
 
     def selected_labels(self) -> list[str]:
         labels: list[str] = []
@@ -174,6 +199,11 @@ class GenerateTab(QWidget):
             if expected_ppm:
                 expected_ppms[label] = expected_ppm
         return expected_ppms
+
+    def _on_labels_item_changed(self, item: QTableWidgetItem) -> None:
+        if item is None:
+            return
+        self.summary_labels_changed.emit()
 
     def _init_parameters_table(self) -> None:
         self.parameters_table.setRowCount(len(self.SUMMARY_PARAMETERS))

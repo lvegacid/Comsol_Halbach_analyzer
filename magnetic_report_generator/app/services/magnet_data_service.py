@@ -138,6 +138,7 @@ class MagnetDataService:
         if selected.size == 0:
             return 0.0, 0.0
 
-        axis_min = float(np.min(selected))
-        axis_max = float(np.max(selected))
-        return abs(axis_min) * 2.0, abs(axis_max) * 2.0
+        abs_selected = np.abs(selected.astype(float))
+        axis_min_abs = float(np.min(abs_selected))
+        axis_max_abs = float(np.max(abs_selected))
+        return axis_min_abs * 2.0, axis_max_abs * 2.0

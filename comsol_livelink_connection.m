@@ -4,7 +4,7 @@ function status = comsol_livelink_connection(action)
 % action:
 %   'status'  -> solo consulta el estado actual de la sesion MATLAB
 %   'connect' -> en Linux intenta conectar con mphstart y, si hace falta,
-%                lanzar `comsol mphserver`; en Windows solo informa
+%                lanzar `comsol mphserver` desacoplado de la terminal
 
     if nargin < 1 || isempty(action)
         action = 'status';
@@ -18,10 +18,15 @@ function status = comsol_livelink_connection(action)
         'message', '', ...
         'detail', '', ...
         'version', '', ...
-        'serverStartAttempted', false);
+        'serverStartAttempted', false, ...
+        'serverPort', [], ...
+        'serverLog', '');
 
     status.hasLiveLink = has_livelink_functions();
     status.canAutoConnect = strcmp(status.platform, 'linux');
+    if strcmp(status.platform, 'linux')
+        [status.serverPort, status.serverLog] = linux_mphserver_settings();
+    end
 
     if ~status.hasLiveLink
         status.message = ['LiveLink for MATLAB no esta disponible en esta sesion. ' ...
@@ -90,6 +95,20 @@ function [connected, detail, versionText] = probe_connection()
             if is_not_connected_error(err)
                 return;
             end
+            % Transient error: retry mphversion once after a short pause
+            pause(0.5);
+            try
+                versionValue = mphversion;
+                versionText = normalize_value(versionValue);
+                connected = true;
+                return;
+            catch retryErr
+                detail = retryErr.message;
+                if is_not_connected_error(retryErr)
+                    return;
+                end
+                % Retry also failed with a transient error — fall through to ModelUtil probes
+            end
         end
     end
 
@@ -120,45 +139,55 @@ function probe_modelutil_modeltags()
 end
 
 function [connected, detail, versionText, startAttempted] = connect_on_linux()
-    connected = false;
-    detail = '';
-    versionText = '';
     startAttempted = false;
+    [serverPort, serverLog] = linux_mphserver_settings();
 
-    [connected, detail, versionText] = try_mphstart_retries(1, 0.0);
+    if exist('mphstart', 'file') == 0
+        detail = 'mphstart no esta disponible en esta sesion MATLAB.';
+        return;
+    end
+
+    % Prefer explicit host+port on Linux to avoid IPv4/IPv6 localhost drift
+    % and random attachment to a different COMSOL server instance.
+    [connected, detail, versionText] = try_mphstart_retries(2, 0.5, serverPort);
     if connected
         return;
     end
 
-    if exist('mphstart', 'file') == 0
-        detail = [detail ' | mphstart no esta disponible en esta sesion MATLAB.'];
-        return;
-    end
-
     startAttempted = true;
-    [statusCode, output] = system(['bash -lc ''nohup comsol mphserver ' ...
-        '> /tmp/comsol_mphserver.log 2>&1 &''']);
+    [statusCode, output] = launch_linux_mphserver(serverPort, serverLog);
 
     if statusCode ~= 0
         detail = strtrim(output);
+        if isempty(detail)
+            detail = sprintf('No se pudo lanzar `comsol mphserver` en el puerto %d.', serverPort);
+        end
         return;
     end
 
-    [connected, detail, versionText] = try_mphstart_retries(6, 2.0);
+    [connected, detail, versionText] = try_mphstart_retries(12, 5.0, serverPort);
     if ~connected && isempty(strtrim(detail))
-        detail = ['Se lanzo `comsol mphserver`, pero MATLAB no pudo conectar. ' ...
-            'Revisa /tmp/comsol_mphserver.log y el puerto por defecto de COMSOL.'];
+        detail = sprintf(['Se lanzo `comsol mphserver` en el puerto %d, ' ...
+            'pero MATLAB no pudo conectar. Revisa %s.'], serverPort, serverLog);
     end
 end
 
-function [connected, detail, versionText] = try_mphstart_retries(maxTries, pauseSeconds)
+function [connected, detail, versionText] = try_mphstart_retries(maxTries, pauseSeconds, serverPort)
+    if nargin < 3
+        serverPort = [];
+    end
+
     connected = false;
     detail = '';
     versionText = '';
 
     for attempt = 1:maxTries
         try
-            mphstart();
+            if isempty(serverPort)
+                mphstart();
+            else
+                start_mph_on_port(serverPort);
+            end
         catch err
             detail = err.message;
         end
@@ -178,6 +207,77 @@ function [connected, detail, versionText] = try_mphstart_retries(maxTries, pause
     end
 end
 
+function start_mph_on_port(serverPort)
+    host = linux_mphserver_host();
+    try
+        mphstart(serverPort);
+    catch firstErr
+        try
+            mphstart(host, serverPort);
+        catch secondErr
+            err = MException('ComsolAnalyzer:LiveLinkConnect', ...
+                'mphstart no pudo conectar a %s:%d: %s | %s', ...
+                host, serverPort, firstErr.message, secondErr.message);
+            throw(err);
+        end
+    end
+end
+
+function [statusCode, output] = launch_linux_mphserver(serverPort, serverLog)
+    logDir = fileparts(serverLog);
+    marker = sprintf('[c]omsol.*mphserver.*%d', serverPort);
+
+    % Build session-detached launch command with fallback chain:
+    %   1. setsid (creates new Unix session — preferred)
+    %   2. systemd-run --user (systemd-based session detachment)
+    %   3. nohup (legacy fallback)
+    command = sprintf(['mkdir -p %s; ' ...
+        'if command -v pgrep >/dev/null 2>&1 && pgrep -f %s >/dev/null 2>&1; then exit 0; fi; ' ...
+        'if command -v setsid >/dev/null 2>&1; then ' ...
+        'echo "[ComsolAnalyzer] Launching comsol mphserver via setsid"; ' ...
+        'setsid comsol mphserver -port %d > %s 2>&1 < /dev/null & ' ...
+        'elif command -v systemd-run >/dev/null 2>&1; then ' ...
+        'echo "[ComsolAnalyzer] Launching comsol mphserver via systemd-run"; ' ...
+        'systemd-run --user --no-block -- comsol mphserver -port %d >> %s 2>&1; ' ...
+        'else ' ...
+        'echo "[ComsolAnalyzer] Launching comsol mphserver via nohup (fallback)"; ' ...
+        'nohup comsol mphserver -port %d > %s 2>&1 < /dev/null & fi'], ...
+        shell_quote(logDir), shell_quote(marker), ...
+        serverPort, shell_quote(serverLog), ...
+        serverPort, shell_quote(serverLog), ...
+        serverPort, shell_quote(serverLog));
+    [statusCode, output] = system(['bash -lc ' shell_quote(command)]);
+end
+
+function [serverPort, serverLog] = linux_mphserver_settings()
+    portText = strtrim(getenv('COMSOL_ANALYZER_MPHSERVER_PORT'));
+    serverPort = str2double(portText);
+    if isnan(serverPort) || serverPort <= 0
+        serverPort = 2036;
+    end
+
+    baseDir = strtrim(getenv('COMSOL_ANALYZER_STATE_DIR'));
+    if isempty(baseDir)
+        baseDir = fullfile(char(java.lang.System.getProperty('user.home')), '.comsol_analyzer');
+    end
+    if isempty(strtrim(baseDir))
+        baseDir = fullfile(tempdir, 'comsol_analyzer');
+    end
+    serverLog = fullfile(baseDir, sprintf('mphserver_%d.log', serverPort));
+end
+
+function host = linux_mphserver_host()
+    host = strtrim(getenv('COMSOL_ANALYZER_MPHSERVER_HOST'));
+    if isempty(host)
+        host = '127.0.0.1';
+    end
+end
+
+function quoted = shell_quote(value)
+    value = char(value);
+    quoted = ['''' strrep(value, '''', '''"''"''') ''''];
+end
+
 function tf = is_not_connected_error(err)
     tf = false;
     if isempty(err)
@@ -187,6 +287,10 @@ function tf = is_not_connected_error(err)
     msg = lower(err.message);
     tf = contains(msg, 'not connected to a server') || ...
          contains(msg, 'no conectado a un servidor') || ...
+         contains(msg, 'connection reset') || ...
+         contains(msg, 'connection timed out') || ...
+         contains(msg, 'broken pipe') || ...
+         contains(msg, 'java.rmi') || ...
          contains(msg, 'connection refused') || ...
          contains(msg, 'failed to connect');
 end
@@ -223,11 +327,15 @@ function msg = build_disconnected_message(platform, startAttempted)
                 'y vuelve a pulsar "Check / Connect LiveLink".'];
         case 'linux'
             if startAttempted
-                msg = ['Sin conexion tras intentar lanzar `comsol mphserver`. ' ...
-                    'Revisa que COMSOL este en PATH y que el servidor arranque correctamente.'];
+                [serverPort, serverLog] = linux_mphserver_settings();
+                msg = sprintf(['Sin conexion tras intentar lanzar `comsol mphserver` ' ...
+                    'en el puerto %d. Revisa que COMSOL este en PATH y consulta %s.'], ...
+                    serverPort, serverLog);
             else
-                msg = ['Sin conexion. Pulsa "Check / Connect LiveLink" para intentar ' ...
-                    'lanzar `comsol mphserver` y conectar MATLAB.'];
+                [serverPort, ~] = linux_mphserver_settings();
+                msg = sprintf(['Sin conexion. Pulsa "Check / Connect LiveLink" para ' ...
+                    'lanzar `comsol mphserver` estable en el puerto %d y conectar MATLAB.'], ...
+                    serverPort);
             end
         otherwise
             msg = 'Sin conexion al servidor COMSOL desde MATLAB.';

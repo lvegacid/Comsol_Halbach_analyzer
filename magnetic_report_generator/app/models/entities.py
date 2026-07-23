@@ -134,6 +134,8 @@ class AppSettings:
     last_other_information: str = ""
     last_report_comment: str = ""
     last_summary_rows: list[str] | None = None
+    last_summary_label_comments: dict[str, str] = field(default_factory=dict)
+    last_summary_label_expected_ppms: dict[str, str] = field(default_factory=dict)
     notion_token: str = ""
     notion_author_name: str = "Lorena Vega"
     notion_author_user_id: str = ""
@@ -155,6 +157,8 @@ class AppSettings:
             "last_other_information": self.last_other_information,
             "last_report_comment": self.last_report_comment,
             "last_summary_rows": None if self.last_summary_rows is None else list(self.last_summary_rows),
+            "last_summary_label_comments": dict(self.last_summary_label_comments),
+            "last_summary_label_expected_ppms": dict(self.last_summary_label_expected_ppms),
             "notion_token": self.notion_token,
             "notion_author_name": self.notion_author_name,
             "notion_author_user_id": self.notion_author_user_id,
@@ -182,6 +186,16 @@ class AppSettings:
                 if "last_summary_rows" not in data
                 else [str(item) for item in data.get("last_summary_rows", []) if str(item).strip()]
             ),
+            last_summary_label_comments={
+                str(key).strip(): str(value).strip()
+                for key, value in dict(data.get("last_summary_label_comments", {})).items()
+                if str(key).strip() and str(value).strip()
+            },
+            last_summary_label_expected_ppms={
+                str(key).strip(): str(value).strip()
+                for key, value in dict(data.get("last_summary_label_expected_ppms", {})).items()
+                if str(key).strip() and str(value).strip()
+            },
             notion_token=str(data.get("notion_token", "")),
             notion_author_name=str(data.get("notion_author_name", "Lorena Vega") or "Lorena Vega"),
             notion_author_user_id=str(data.get("notion_author_user_id", "")),

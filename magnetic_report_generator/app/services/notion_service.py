@@ -551,6 +551,7 @@ class NotionService:
         bh_study_index = 0
         in_bfield_plots = False
         bfield_plot_index = 0
+        current_bfield_plot_prefix = ""
         while i < len(lines):
             line = lines[i].rstrip()
             stripped = line.strip()
@@ -582,7 +583,7 @@ class NotionService:
                     and lines[look_ahead].strip().startswith("<table>")
                 ):
                     bfield_plot_index += 1
-                    blocks.append(self._heading_block(3, f"3.1.2.{bfield_plot_index} {stripped}"))
+                    blocks.append(self._heading_block(3, f"{current_bfield_plot_prefix}.{bfield_plot_index} {stripped}"))
                     i += 1
                     continue
 
@@ -652,13 +653,18 @@ class NotionService:
                         i += 1
                         continue
 
-                    if heading_text.startswith("3.1.2 Plots"):
+                    plot_heading_match = re.match(r"^(\d+\.\d+)\.2\s+Plots$", heading_text)
+                    if plot_heading_match:
                         in_bfield_plots = True
                         bfield_plot_index = 0
+                        current_bfield_plot_prefix = f"{plot_heading_match.group(1)}.2"
                     else:
                         in_bfield_plots = False
 
-                    blocks.append(self._heading_block(3, heading_text))
+                    if markdown_level == 4 and re.match(r"^\d+\.\d+\.\d+\s+(Table summary|Plots)$", heading_text):
+                        blocks.append(self._heading_block(2, heading_text))
+                    else:
+                        blocks.append(self._heading_block(3, heading_text))
                     i += 1
                     continue
 
@@ -736,7 +742,7 @@ class NotionService:
             if len(rows[0]) >= 2 and rows[0][0].strip().lower() == "field" and rows[0][1].strip().lower() == "value":
                 key_value_rows = [row for row in rows[2:] if len(row) >= 2]
                 if key_value_rows:
-                    return self._wide_key_value_table_block(key_value_rows)
+                    return self._key_value_table_block(key_value_rows)
 
             data_rows = [rows[0]] + rows[2:]
             width = max(len(row) for row in data_rows) if data_rows else len(rows[0])
@@ -745,15 +751,27 @@ class NotionService:
             if any(len(row) == 0 for row in data_rows):
                 return self._code_block("\n".join(table_lines))
 
+            summary_table = bool(data_rows and data_rows[0] and data_rows[0][0].strip() in {"Parameter", "Simulation"})
             children = []
-            for row in data_rows:
+            for row_index, row in enumerate(data_rows):
                 padded = row + [""] * (width - len(row))
+                row_is_header = row_index == 0
+                row_has_ppm_metric = any("ppm" in cell.lower() for cell in row)
                 children.append(
                     {
                         "object": "block",
                         "type": "table_row",
                         "table_row": {
-                            "cells": [[self._text_obj(cell)] for cell in padded]
+                            "cells": [
+                                [
+                                    self._text_obj(
+                                        cell,
+                                        bold=row_is_header or row_has_ppm_metric,
+                                        color=self._table_cell_color(summary_table, row_index, col_index, row_has_ppm_metric),
+                                    )
+                                ]
+                                for col_index, cell in enumerate(padded)
+                            ]
                         },
                     }
                 )
@@ -764,7 +782,7 @@ class NotionService:
                 "table": {
                     "table_width": width,
                     "has_column_header": True,
-                    "has_row_header": False,
+                    "has_row_header": summary_table,
                     "children": children,
                 },
             }
@@ -777,35 +795,19 @@ class NotionService:
         parts = [part.strip().replace("\\|", "|") for part in inner.split("|")]
         return parts
 
-    def _wide_key_value_table_block(self, key_value_rows: list[list[str]]) -> dict[str, Any]:
-        children: list[dict[str, Any]] = [
-            {
-                "object": "block",
-                "type": "table_row",
-                "table_row": {
-                    "cells": [
-                        [self._text_obj("Field")],
-                        [self._text_obj("Value")],
-                        [self._text_obj("Field")],
-                        [self._text_obj("Value")],
-                    ]
-                },
-            }
-        ]
-
-        for idx in range(0, len(key_value_rows), 2):
-            left = key_value_rows[idx]
-            right = key_value_rows[idx + 1] if idx + 1 < len(key_value_rows) else ["", ""]
+    def _key_value_table_block(self, key_value_rows: list[list[str]]) -> dict[str, Any]:
+        children: list[dict[str, Any]] = []
+        for row in key_value_rows:
+            key = str(row[0]) if len(row) >= 1 else ""
+            value = str(row[1]) if len(row) >= 2 else ""
             children.append(
                 {
                     "object": "block",
                     "type": "table_row",
                     "table_row": {
                         "cells": [
-                            [self._text_obj(str(left[0]))],
-                            [self._text_obj(str(left[1]))],
-                            [self._text_obj(str(right[0]))],
-                            [self._text_obj(str(right[1]))],
+                            [self._text_obj(key, color="blue_background")],
+                            [self._text_obj(value)],
                         ]
                     },
                 }
@@ -815,12 +817,22 @@ class NotionService:
             "object": "block",
             "type": "table",
             "table": {
-                "table_width": 4,
-                "has_column_header": True,
-                "has_row_header": False,
+                "table_width": 2,
+                "has_column_header": False,
+                "has_row_header": True,
                 "children": children,
             },
         }
+
+    @staticmethod
+    def _table_cell_color(summary_table: bool, row_index: int, col_index: int, row_has_ppm_metric: bool) -> str:
+        if row_has_ppm_metric and row_index > 0:
+            return "orange_background"
+        if row_index == 0:
+            return "blue_background" if summary_table else "default"
+        if col_index == 0:
+            return "gray_background" if summary_table else "default"
+        return "default"
 
     def _html_table_to_image_blocks(self, html: str, base_dir: Path, token: str) -> list[dict[str, Any]]:
         parser = _ImageTableParser()
@@ -1096,8 +1108,24 @@ class NotionService:
             raise NotionServiceError(f"Notion network error: {exc}") from exc
 
     @staticmethod
-    def _text_obj(text: str) -> dict[str, Any]:
-        return {"type": "text", "text": {"content": text[:2000]}}
+    def _text_obj(
+        text: str,
+        *,
+        bold: bool = False,
+        color: str = "default",
+    ) -> dict[str, Any]:
+        return {
+            "type": "text",
+            "text": {"content": text[:2000]},
+            "annotations": {
+                "bold": bold,
+                "italic": False,
+                "strikethrough": False,
+                "underline": False,
+                "code": False,
+                "color": color,
+            },
+        }
 
     def _heading_block(self, level: int, text: str) -> dict[str, Any]:
         block_type = {1: "heading_1", 2: "heading_2", 3: "heading_3"}.get(level, "heading_3")
