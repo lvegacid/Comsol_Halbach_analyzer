@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+import fnmatch
 from html import escape
 import os
 from pathlib import Path
@@ -11,14 +13,29 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
-from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Image, PageBreak, Paragraph, Preformatted, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from app.models.entities import AttachedImageInfo, MagnetMetrics, MaterialCurve, ReportPayload, SimulationStudyResult
+
+
+@dataclass(slots=True)
+class ParsedBHDocumentation:
+    input_parameters_block: str | None
+    bh_table_header: list[str]
+    bh_table_rows: list[list[str]]
+
+
+@dataclass(slots=True)
+class TocEntry:
+    level: int
+    title: str
+    anchor: str
 
 
 class ReportService:
     def __init__(self) -> None:
         self._temp_image_paths: list[Path] = []
+        self._active_heading_lookup: dict[str, tuple[int, str]] = {}
         styles = getSampleStyleSheet()
         self.title_style = ParagraphStyle(
             "DocTitle",
@@ -30,8 +47,18 @@ class ReportService:
         self.h1 = ParagraphStyle("H1", parent=styles["Heading1"], textColor=colors.HexColor("#1F3C5A"))
         self.h2 = ParagraphStyle("H2", parent=styles["Heading2"], textColor=colors.HexColor("#2A567B"))
         self.h3 = ParagraphStyle("H3", parent=styles["Heading3"], textColor=colors.HexColor("#356E96"))
+        self.h4 = ParagraphStyle("H4", parent=styles["Heading4"], textColor=colors.HexColor("#4D7FA6"))
         self.normal = styles["BodyText"]
         self.cell = ParagraphStyle("Cell", parent=styles["BodyText"], wordWrap="CJK", fontSize=9)
+        self.code_block = ParagraphStyle(
+            "CodeBlock",
+            parent=styles["Code"],
+            fontName="Courier",
+            fontSize=8.2,
+            leading=9.8,
+            leftIndent=6,
+            rightIndent=6,
+        )
         self.study_title = ParagraphStyle(
             "StudyTitle",
             parent=styles["BodyText"],
@@ -51,6 +78,7 @@ class ReportService:
 
     def generate_pdf(self, payload: ReportPayload) -> None:
         self._temp_image_paths = []
+        self._active_heading_lookup = self._build_heading_lookup(payload)
         doc = SimpleDocTemplate(
             str(payload.output_path),
             pagesize=A4,
@@ -100,9 +128,11 @@ class ReportService:
             doc.build(story, onFirstPage=self._add_page_number, onLaterPages=self._add_page_number)
         finally:
             self._cleanup_temp_images()
+            self._active_heading_lookup = {}
 
     def generate_markdown(self, payload: ReportPayload) -> None:
         out_path = payload.output_path
+        self._active_heading_lookup = self._build_heading_lookup(payload)
         lines: list[str] = []
 
         title = "Magnetic Simulation Report Generator"
@@ -143,9 +173,41 @@ class ReportService:
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text("\n".join(lines), encoding="utf-8")
+        self._active_heading_lookup = {}
+
+    def _build_heading_lookup(self, payload: ReportPayload) -> dict[str, tuple[int, str]]:
+        entries = self._toc_entries(payload)
+        numbered = self._numbered_toc_entries(entries)
+        return {anchor: (level, title) for level, title, anchor in numbered}
+
+    def _heading_level(self, anchor: str, fallback_level: int) -> int:
+        return self._active_heading_lookup.get(anchor, (fallback_level, ""))[0]
+
+    def _heading_text(self, anchor: str, fallback_title: str) -> str:
+        return self._active_heading_lookup.get(anchor, (0, fallback_title))[1]
+
+    def _pdf_style_for_depth(self, depth: int) -> ParagraphStyle:
+        if depth <= 1:
+            return self.h1
+        if depth == 2:
+            return self.h2
+        if depth == 3:
+            return self.h3
+        return self.h4
+
+    def _md_heading(self, anchor: str, fallback_title: str, fallback_level: int) -> str:
+        level = min(max(self._heading_level(anchor, fallback_level), 1), 6)
+        title = self._heading_text(anchor, fallback_title)
+        return f"{'#' * level} {title}"
 
     def _append_magnet_data(self, story: list, metrics: MagnetMetrics, geometry_images: list[Path]) -> None:
-        story.append(self._anchored_heading("magnet-data", "Magnet Data", self.h1))
+        story.append(
+            self._anchored_heading(
+                "magnet-data",
+                self._heading_text("magnet-data", "Magnet data"),
+                self._pdf_style_for_depth(self._heading_level("magnet-data", 1)),
+            )
+        )
         story.append(Spacer(1, 0.2 * cm))
 
         rows = [
@@ -184,9 +246,23 @@ class ReportService:
             self._append_attached_images(story, metrics.other_info_images)
             story.append(Spacer(1, 0.15 * cm))
 
-        self._append_geometry_images_row(story, geometry_images)
+        if geometry_images:
+            story.append(
+                self._anchored_heading(
+                    "magnet-data-geometry",
+                    self._heading_text("magnet-data-geometry", "Geometry"),
+                    self._pdf_style_for_depth(self._heading_level("magnet-data-geometry", 2)),
+                )
+            )
+            self._append_geometry_images_row(story, geometry_images)
 
-        story.append(Paragraph("Rings", self.h2))
+        story.append(
+            self._anchored_heading(
+                "magnet-data-rings",
+                self._heading_text("magnet-data-rings", "Rings"),
+                self._pdf_style_for_depth(self._heading_level("magnet-data-rings", 2)),
+            )
+        )
         ring_rows = [["Ring", "X position (mm)", "Magnets"]]
         for ring in metrics.rings:
             ring_rows.append([str(ring.ring_index), self._fmt(ring.x_position_mm), str(ring.magnets)])
@@ -205,36 +281,70 @@ class ReportService:
 
     def _append_index(self, story: list, payload: ReportPayload) -> None:
         story.append(self._anchored_heading("index", "Index", self.h1))
-        entries: list[tuple[int, str, str]] = [
-            (0, "1. Magnet data", "magnet-data"),
-            (0, "2. BH curves", "bh-curves"),
-        ]
-
-        for study_index, study in enumerate(payload.studies, start=1):
-            study_anchor = self._bh_study_anchor(study.folder_name)
-            entries.append((1, f"2.{study_index} {study.folder_name}", study_anchor))
-
-        entries.append((0, "3. Simulation B_field results", "simulation-bfield-results"))
-
-        bfield_labels = self._selected_bfield_labels(payload.studies, payload.summary_labels)
-        for label_index, label in enumerate(bfield_labels, start=1):
-            label_anchor = self._label_anchor(label)
-            section_number = f"3.{label_index}"
-            entries.append((1, f"{section_number} {label}", label_anchor))
-            entries.append((2, f"{section_number}.1 Table summary", f"{label_anchor}-table"))
-            entries.append((2, f"{section_number}.2 Plots", f"{label_anchor}-plots"))
-            for study_index, study in enumerate(payload.studies, start=1):
-                entries.append((3, f"{section_number}.2.{study_index} {study.folder_name}", f"{label_anchor}-plots-{study_index}"))
-
-        entries.append((0, "4. Simulation Magnet results", "simulation-magnet-results"))
-        entries.append((1, "4.1 Table summary", "simulation-magnet-results-table"))
-        entries.append((1, "4.2 Plots", "simulation-magnet-results-plots"))
-        for study_index, study in enumerate(payload.studies, start=1):
-            entries.append((2, f"4.2.{study_index} {study.folder_name}", f"magnet-plots-{study_index}"))
-
-        for indent, entry, anchor in entries:
-            spacer = "&nbsp;" * (indent * 6)
+        entries = self._toc_entries(payload)
+        numbered = self._numbered_toc_entries(entries)
+        for level, entry, anchor in numbered:
+            spacer = "&nbsp;" * ((level - 1) * 6)
             story.append(Paragraph(f'{spacer}<a href="#{anchor}" color="blue">{escape(entry)}</a>', self.normal))
+
+    def _toc_entries(self, payload: ReportPayload) -> list[TocEntry]:
+        geometry_images = self._find_geometry_images(payload.studies)
+        entries: list[TocEntry] = [
+            TocEntry(level=1, title="Magnet data", anchor="magnet-data"),
+            TocEntry(level=2, title="Geometry", anchor="magnet-data-geometry") if geometry_images else None,
+            TocEntry(level=2, title="Rings", anchor="magnet-data-rings"),
+            TocEntry(level=1, title="BH curves", anchor="bh-curves"),
+        ]
+        entries = [item for item in entries if item is not None]
+        for study in payload.studies:
+            entries.append(
+                TocEntry(level=2, title=self._bh_material_display_name(study), anchor=self._bh_study_anchor(study.folder_name))
+            )
+
+        entries.append(TocEntry(level=1, title="Simulation B_field results", anchor="simulation-bfield-results"))
+        bfield_labels = self._selected_bfield_labels(payload.studies, payload.summary_labels)
+        for label in bfield_labels:
+            label_anchor = self._label_anchor(label)
+            entries.append(TocEntry(level=2, title=label, anchor=label_anchor))
+            entries.append(TocEntry(level=3, title="Table summary", anchor=f"{label_anchor}-table"))
+            entries.append(TocEntry(level=3, title="Plots", anchor=f"{label_anchor}-plots"))
+            for study_index, study in enumerate(payload.studies, start=1):
+                entries.append(TocEntry(level=4, title=study.folder_name, anchor=f"{label_anchor}-plots-{study_index}"))
+
+        entries.append(TocEntry(level=1, title="Simulation Magnet results", anchor="simulation-magnet-results"))
+        entries.append(TocEntry(level=2, title="NormM", anchor="simulation-magnet-results-normm"))
+        entries.append(TocEntry(level=3, title="Table summary", anchor="simulation-magnet-results-table"))
+        entries.append(TocEntry(level=3, title="Plots", anchor="simulation-magnet-results-plots"))
+        for study_index, study in enumerate(payload.studies, start=1):
+            entries.append(TocEntry(level=4, title=study.folder_name, anchor=f"magnet-plots-{study_index}"))
+
+        normh_studies = self._normh_studies(payload.studies)
+        if normh_studies:
+            entries.append(TocEntry(level=2, title="NormH", anchor="simulation-magnet-results-normh"))
+            for study_index, study in enumerate(normh_studies, start=1):
+                entries.append(TocEntry(level=3, title=study.folder_name, anchor=f"normh-plots-{study_index}"))
+        return entries
+
+    @staticmethod
+    def _numbered_toc_entries(entries: list[TocEntry]) -> list[tuple[int, str, str]]:
+        counters: list[int] = []
+        numbered: list[tuple[int, str, str]] = []
+        for item in entries:
+            while len(counters) < item.level:
+                counters.append(0)
+            while len(counters) > item.level:
+                counters.pop()
+            counters[item.level - 1] += 1
+            for idx in range(item.level, len(counters)):
+                counters[idx] = 0
+            prefix = ".".join(str(value) for value in counters[: item.level] if value > 0)
+            if prefix:
+                label_prefix = f"{prefix}." if item.level == 1 else prefix
+                label = f"{label_prefix} {item.title}"
+            else:
+                label = item.title
+            numbered.append((item.level, label, item.anchor))
+        return numbered
 
     def _append_bfield_results(
         self,
@@ -245,7 +355,13 @@ class ReportService:
         label_comments: dict[str, str],
         label_expected_ppms: dict[str, str],
     ) -> None:
-        story.append(self._anchored_heading("simulation-bfield-results", "Simulation B_field results", self.h1))
+        story.append(
+            self._anchored_heading(
+                "simulation-bfield-results",
+                self._heading_text("simulation-bfield-results", "Simulation B_field results"),
+                self._pdf_style_for_depth(self._heading_level("simulation-bfield-results", 1)),
+            )
+        )
         parent_path = self._common_parent_path(studies)
         if parent_path:
             story.append(Paragraph(f"Path: {escape(parent_path)}", self.cell))
@@ -257,10 +373,15 @@ class ReportService:
             return
 
         for label_index, label in enumerate(bfield_labels, start=1):
-            section_number = f"3.{label_index}"
             label_anchor = self._label_anchor(label)
             story.append(Spacer(1, 0.2 * cm))
-            story.append(self._anchored_heading(label_anchor, f"{section_number} {label}", self.h2))
+            story.append(
+                self._anchored_heading(
+                    label_anchor,
+                    self._heading_text(label_anchor, label),
+                    self._pdf_style_for_depth(self._heading_level(label_anchor, 2)),
+                )
+            )
             comment = label_comments.get(label, "").strip()
             if comment:
                 story.append(Paragraph(f'Details: "{escape(comment)}"', self.cell))
@@ -268,42 +389,120 @@ class ReportService:
             if expected_ppm:
                 story.append(Paragraph(f'Expected ppms: {escape(expected_ppm)}', self.cell))
 
-            story.append(self._anchored_heading(f"{label_anchor}-table", f"{section_number}.1 Table summary", self.h3))
+            story.append(
+                self._anchored_heading(
+                    f"{label_anchor}-table",
+                    self._heading_text(f"{label_anchor}-table", "Table summary"),
+                    self._pdf_style_for_depth(self._heading_level(f"{label_anchor}-table", 3)),
+                )
+            )
             table = self._build_summary_table_for_label(studies, label, selected_parameters)
             story.append(table)
 
-            story.append(self._anchored_heading(f"{label_anchor}-plots", f"{section_number}.2 Plots", self.h3))
-            self._append_bfield_label_plots(story, studies, label, section_number)
+            story.append(
+                self._anchored_heading(
+                    f"{label_anchor}-plots",
+                    self._heading_text(f"{label_anchor}-plots", "Plots"),
+                    self._pdf_style_for_depth(self._heading_level(f"{label_anchor}-plots", 3)),
+                )
+            )
+            self._append_bfield_label_plots(story, studies, label)
 
     def _append_magnet_results(self, story: list, studies: list[SimulationStudyResult], selected_parameters: list[str]) -> None:
-        story.append(self._anchored_heading("simulation-magnet-results", "Simulation Magnet results", self.h1))
-        story.append(self._anchored_heading("simulation-magnet-results-table", "Table summary", self.h2))
+        normh_studies = self._normh_studies(studies)
+        story.append(
+            self._anchored_heading(
+                "simulation-magnet-results",
+                self._heading_text("simulation-magnet-results", "Simulation Magnet results"),
+                self._pdf_style_for_depth(self._heading_level("simulation-magnet-results", 1)),
+            )
+        )
+        story.append(
+            self._anchored_heading(
+                "simulation-magnet-results-normm",
+                self._heading_text("simulation-magnet-results-normm", "NormM"),
+                self._pdf_style_for_depth(self._heading_level("simulation-magnet-results-normm", 2)),
+            )
+        )
+        story.append(
+            self._anchored_heading(
+                "simulation-magnet-results-table",
+                self._heading_text("simulation-magnet-results-table", "Table summary"),
+                self._pdf_style_for_depth(self._heading_level("simulation-magnet-results-table", 3)),
+            )
+        )
         magnet_table = self._build_magnet_summary_table(studies)
         story.append(magnet_table)
 
-        story.append(self._anchored_heading("simulation-magnet-results-plots", "Plots", self.h2))
+        story.append(
+            self._anchored_heading(
+                "simulation-magnet-results-plots",
+                self._heading_text("simulation-magnet-results-plots", "Plots"),
+                self._pdf_style_for_depth(self._heading_level("simulation-magnet-results-plots", 3)),
+            )
+        )
         for study_index, study in enumerate(studies, start=1):
-            story.append(self._anchored_heading(f"magnet-plots-{study_index}", study.folder_name, self.h3))
+            plot_anchor = f"magnet-plots-{study_index}"
+            story.append(
+                self._anchored_heading(
+                    plot_anchor,
+                    self._heading_text(plot_anchor, study.folder_name),
+                    self._pdf_style_for_depth(self._heading_level(plot_anchor, 4)),
+                )
+            )
             self._append_magnet_only_plots(story, study)
 
+        if normh_studies:
+            story.append(
+                self._anchored_heading(
+                    "simulation-magnet-results-normh",
+                    self._heading_text("simulation-magnet-results-normh", "NormH"),
+                    self._pdf_style_for_depth(self._heading_level("simulation-magnet-results-normh", 2)),
+                )
+            )
+            for study_index, study in enumerate(normh_studies, start=1):
+                plot_anchor = f"normh-plots-{study_index}"
+                story.append(
+                    self._anchored_heading(
+                        plot_anchor,
+                        self._heading_text(plot_anchor, study.folder_name),
+                        self._pdf_style_for_depth(self._heading_level(plot_anchor, 3)),
+                    )
+                )
+                self._append_single_image_with_caption(
+                    story,
+                    Path(study.magnets.normh_histogram),
+                    caption=None,
+                    width=16.0 * cm,
+                    height=8.2 * cm,
+                )
+
     def _append_bh_curves(self, story: list, studies: list[SimulationStudyResult]) -> None:
-        story.append(self._anchored_heading("bh-curves", "BH curves", self.h1))
+        story.append(
+            self._anchored_heading(
+                "bh-curves",
+                self._heading_text("bh-curves", "BH curves"),
+                self._pdf_style_for_depth(self._heading_level("bh-curves", 1)),
+            )
+        )
 
         if not studies:
             story.append(Paragraph("No simulation studies selected.", self.normal))
             return
 
         for study in studies:
-            story.append(self._anchored_heading(self._bh_study_anchor(study.folder_name), study.folder_name, self.h2))
+            material_title = self._bh_material_display_name(study)
+            study_anchor = self._bh_study_anchor(study.folder_name)
+            story.append(
+                self._anchored_heading(
+                    study_anchor,
+                    self._heading_text(study_anchor, material_title),
+                    self._pdf_style_for_depth(self._heading_level(study_anchor, 2)),
+                )
+            )
 
             material = study.material_curve
-            material_name = material.name if material is not None and material.name else study.material_name
-            if material_name:
-                story.append(Paragraph(f"Material used: {escape(material_name)}", self.cell))
-            else:
-                story.append(Paragraph("Material used: N/A", self.cell))
-
-            self._append_material_details(story, material, heading="BH curve")
+            self._append_material_details(story, material)
             story.append(Spacer(1, 0.1 * cm))
 
     def _build_summary_table_for_label(
@@ -500,14 +699,21 @@ class ReportService:
             return b, 0.0
         return 0.0, 0.0
 
-    def _append_bfield_label_plots(self, story: list, studies: list[SimulationStudyResult], label: str, section_number: str) -> None:
+    def _append_bfield_label_plots(self, story: list, studies: list[SimulationStudyResult], label: str) -> None:
         found = False
         for study_index, study in enumerate(studies, start=1):
             domain = next((domain for domain in study.domains if domain.name == label), None)
             if domain is None:
                 continue
             found = True
-            story.append(self._anchored_heading(f"{self._label_anchor(label)}-plots-{study_index}", f"{section_number}.2.{study_index} {study.folder_name}", self.h3))
+            plot_anchor = f"{self._label_anchor(label)}-plots-{study_index}"
+            story.append(
+                self._anchored_heading(
+                    plot_anchor,
+                    self._heading_text(plot_anchor, study.folder_name),
+                    self._pdf_style_for_depth(self._heading_level(plot_anchor, 4)),
+                )
+            )
             self._append_domain_pair(story, domain.plot_3d, domain.histogram)
             self._append_projection_row_pdf(story, domain.projection_xy, domain.projection_yz, domain.projection_xz)
             self._append_optional_image(story, "Custom Coordinates", domain.custom_coordinates)
@@ -727,39 +933,154 @@ class ReportService:
             story.append(table)
             story.append(Spacer(1, 0.15 * cm))
 
-    def _append_material_details(self, story: list, material: MaterialCurve | None, heading: str = "Material details") -> None:
+    def _append_material_details(self, story: list, material: MaterialCurve | None) -> None:
         if material is None:
             return
 
         story.append(Spacer(1, 0.12 * cm))
-        story.append(Paragraph(heading, self.h3))
-
         if material.comment:
             story.append(Paragraph(f"Comment: {escape(material.comment)}", self.cell))
 
         for link in material.links:
             story.append(self._material_link_paragraph(link))
 
-        curve_rows = [["H (kA/m)", "B (T)"]]
-        for h_val, b_val in material.points:
-            curve_rows.append([self._fmt(h_val), self._fmt(b_val)])
+        if material.points:
+            curve_rows = [["H (kA/m)", "B (T)"]]
+            for h_val, b_val in material.points:
+                curve_rows.append([self._fmt(h_val), self._fmt(b_val)])
 
-        curve_table = Table(curve_rows, colWidths=[4.5 * cm, 4.5 * cm])
-        curve_table.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DDEAF7")),
-                    ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#B5C6D7")),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                ]
+            curve_table = Table(curve_rows, colWidths=[4.5 * cm, 4.5 * cm])
+            curve_table.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DDEAF7")),
+                        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#B5C6D7")),
+                        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                    ]
+                )
             )
-        )
-        story.append(curve_table)
+            story.append(curve_table)
         if material.images:
             story.append(Spacer(1, 0.12 * cm))
             story.append(Paragraph("Material images", self.normal))
             self._append_attached_images(story, material.images)
+
+        self._append_external_material_documentation_pdf(story, material)
+
+    def _append_external_material_documentation_pdf(self, story: list, material: MaterialCurve) -> None:
+        txt_path = Path(material.external_txt_path) if material.external_txt_path else None
+        png_path = Path(material.external_png_path) if material.external_png_path else None
+        parsed = self._parse_external_bh_documentation(txt_path)
+
+        has_png = png_path is not None and png_path.exists()
+        if parsed is None and not has_png:
+            return
+
+        story.append(Spacer(1, 0.15 * cm))
+
+        if parsed is not None and parsed.input_parameters_block is not None:
+            story.append(Spacer(1, 0.08 * cm))
+            story.append(Paragraph("INPUT PARAMETERS", self.normal))
+            story.append(Preformatted(parsed.input_parameters_block, self.code_block))
+
+        if parsed is not None and parsed.bh_table_header:
+            story.append(Spacer(1, 0.08 * cm))
+            story.append(Paragraph("BH Curve Table", self.normal))
+            bh_rows = [parsed.bh_table_header] + parsed.bh_table_rows
+            if len(bh_rows) > 1:
+                table = Table(bh_rows, colWidths=[3.24 * cm] * len(parsed.bh_table_header))
+                table.setStyle(
+                    TableStyle(
+                        [
+                            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DDEAF7")),
+                            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#B5C6D7")),
+                            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                        ]
+                    )
+                )
+                story.append(table)
+
+        if has_png and png_path is not None:
+            story.append(Spacer(1, 0.1 * cm))
+            story.append(Paragraph("BH Curve Image", self.normal))
+            self._append_single_image_with_caption(story, png_path, caption=None, width=16.0 * cm, height=8.2 * cm)
+
+    def _build_markdown_external_material_documentation(self, material: MaterialCurve, out_path: Path) -> list[str]:
+        txt_path = Path(material.external_txt_path) if material.external_txt_path else None
+        png_path = Path(material.external_png_path) if material.external_png_path else None
+        parsed = self._parse_external_bh_documentation(txt_path)
+
+        has_png = png_path is not None and png_path.exists()
+        if parsed is None and not has_png:
+            return []
+
+        lines = [""]
+
+        if parsed is not None and parsed.input_parameters_block is not None:
+            lines.append("INPUT PARAMETERS")
+            lines.append("```text")
+            lines.append(parsed.input_parameters_block)
+            lines.append("```")
+            lines.append("")
+
+        if parsed is not None and parsed.bh_table_header:
+            lines.append("BH Curve Table")
+            lines.append("| " + " | ".join(parsed.bh_table_header) + " |")
+            lines.append("|" + "|".join(["---"] * len(parsed.bh_table_header)) + "|")
+            for row in parsed.bh_table_rows:
+                lines.append("| " + " | ".join(self._escape_md(col) for col in row) + " |")
+            lines.append("")
+
+        if has_png and png_path is not None:
+            lines.append("BH Curve Image")
+            lines.extend(self._md_image_grid([(None, str(png_path), "")], out_path, columns=1))
+            lines.append("")
+
+        return lines
+
+    def _parse_external_bh_documentation(self, txt_path: Path | None) -> ParsedBHDocumentation | None:
+        if txt_path is None or not txt_path.exists():
+            return None
+
+        try:
+            content = txt_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return None
+
+        lines = content.splitlines()
+        input_parameters_start = "================= INPUT PARAMETERS ================="
+        input_parameters_end = "===================================================="
+        bh_table_header = ["H", "mu0*M", "mu0*H", "B", "muB"]
+
+        input_block: str | None = None
+        start_idx = next((idx for idx, line in enumerate(lines) if line == input_parameters_start), -1)
+        if start_idx >= 0:
+            end_idx = next((idx for idx in range(start_idx + 1, len(lines)) if lines[idx] == input_parameters_end), -1)
+            if end_idx > start_idx:
+                input_block = "\n".join(lines[start_idx + 1 : end_idx])
+
+        header_idx = next((idx for idx, line in enumerate(lines) if self._is_external_bh_header_line(line)), -1)
+        rows: list[list[str]] = []
+        if header_idx >= 0:
+            for line in lines[header_idx + 1 :]:
+                if not line.strip():
+                    continue
+                columns = [segment.strip() for segment in line.split("\t")]
+                if len(columns) < len(bh_table_header):
+                    continue
+                rows.append(columns[: len(bh_table_header)])
+
+        if input_block is None and not rows:
+            return None
+        return ParsedBHDocumentation(input_parameters_block=input_block, bh_table_header=bh_table_header if rows else [], bh_table_rows=rows)
+
+    @staticmethod
+    def _is_external_bh_header_line(line: str) -> bool:
+        tokens = line.split()
+        return tokens[:5] == ["H", "mu0*M", "mu0*H", "B", "muB"]
 
     def _material_link_paragraph(self, raw_link: str) -> Paragraph:
         href = escape(raw_link, quote=True)
@@ -915,36 +1236,15 @@ class ReportService:
 
     def _build_markdown_index(self, payload: ReportPayload) -> list[str]:
         lines = ["## Index", ""]
-        lines.append("- [1. Magnet data](#1-magnet-data)")
-        lines.append("- [2. BH curves](#2-bh-curves)")
-
-        for study_index, study in enumerate(payload.studies, start=1):
-            lines.append(f"- [2.{study_index} {study.folder_name}](#2{study_index}-{self._slug(study.folder_name)})")
-
-        lines.append("- [3. Simulation B_field results](#3-simulation-b_field-results)")
-
-        bfield_labels = self._selected_bfield_labels(payload.studies, payload.summary_labels)
-        for label_index, label in enumerate(bfield_labels, start=1):
-            section_number = f"3.{label_index}"
-            section_slug = section_number.replace(".", "")
-            lines.append(f"- [{section_number} {label}](#{section_slug}-{self._slug(label)})")
-            lines.append(f"- [{section_number}.1 Table summary](#{section_slug}1-table-summary)")
-            lines.append(f"- [{section_number}.2 Plots](#{section_slug}2-plots)")
-            for study_index, study in enumerate(payload.studies, start=1):
-                lines.append(
-                    f"- [{section_number}.2.{study_index} {study.folder_name}]"
-                    f"(#{section_slug}2{study_index}-{self._slug(study.folder_name)})"
-                )
-
-        lines.append("- [4. Simulation Magnet results](#4-simulation-magnet-results)")
-        lines.append("- [4.1 Table summary](#41-table-summary)")
-        lines.append("- [4.2 Plots](#42-plots)")
-        for study_index, study in enumerate(payload.studies, start=1):
-            lines.append(f"- [4.2.{study_index} {study.folder_name}](#42{study_index}-{self._slug(study.folder_name)})")
+        entries = self._toc_entries(payload)
+        numbered = self._numbered_toc_entries(entries)
+        for level, title, anchor in numbered:
+            indent = "  " * (level - 1)
+            lines.append(f"{indent}- {self._escape_md(title)}")
         return lines
 
     def _build_markdown_magnet_data(self, metrics: MagnetMetrics, geometry_images: list[Path], out_path: Path) -> list[str]:
-        lines = ["## 1. Magnet data", ""]
+        lines = [self._md_heading("magnet-data", "1. Magnet data", 1), ""]
         rows = [
             ("Project", metrics.project),
             ("COMSOL Version", metrics.comsol_version),
@@ -967,33 +1267,32 @@ class ReportService:
         lines.append("")
 
         if metrics.other_info_images:
-            lines.append("### Other information images")
+            lines.append("Other information images")
             lines.extend(self._md_image_grid([(None, item.path, item.comment) for item in metrics.other_info_images], out_path, columns=2))
             lines.append("")
 
         if geometry_images:
-            lines.append("### Geometry")
+            lines.append(self._md_heading("magnet-data-geometry", "1.1 Geometry", 2))
             lines.extend(self._md_image_grid([(None, str(path), "") for path in geometry_images], out_path, columns=max(1, len(geometry_images))))
             lines.append("")
 
-        lines.append("### Rings")
+        lines.append(self._md_heading("magnet-data-rings", "1.2 Rings", 2))
         lines.extend(["| Ring | X position (mm) | Magnets |", "|---:|---:|---:|"])
         for ring in metrics.rings:
             lines.append(f"| {ring.ring_index} | {self._fmt(ring.x_position_mm)} | {ring.magnets} |")
         return lines
 
     def _build_markdown_bh_curves(self, studies: list[SimulationStudyResult], out_path: Path) -> list[str]:
-        lines = ["## 2. BH curves", ""]
+        lines = [self._md_heading("bh-curves", "2. BH curves", 1), ""]
         if not studies:
             lines.append("No simulation studies selected.")
             return lines
 
         for study in studies:
-            lines.append(f"### {study.folder_name}")
+            material_title = self._bh_material_display_name(study)
+            study_anchor = self._bh_study_anchor(study.folder_name)
+            lines.append(self._md_heading(study_anchor, material_title, 2))
             material = study.material_curve
-            material_name = material.name if material is not None and material.name else study.material_name
-            lines.append(f"Material used: {self._escape_md(material_name or 'N/A')}")
-            lines.append("")
             lines.extend(self._build_markdown_material_details(material, out_path))
             lines.append("")
         return lines
@@ -1009,14 +1308,17 @@ class ReportService:
             lines.append(f"Reference link: [{self._escape_md(link)}]({link})")
         lines.append("")
 
-        lines.extend(["| H (kA/m) | B (T) |", "|---:|---:|"])
-        for h_val, b_val in material.points:
-            lines.append(f"| {self._fmt(h_val)} | {self._fmt(b_val)} |")
+        if material.points:
+            lines.extend(["| H (kA/m) | B (T) |", "|---:|---:|"])
+            for h_val, b_val in material.points:
+                lines.append(f"| {self._fmt(h_val)} | {self._fmt(b_val)} |")
 
         if material.images:
             lines.append("")
             lines.append("Material images")
             lines.extend(self._md_image_grid([(None, item.path, item.comment) for item in material.images], out_path, columns=2))
+
+        lines.extend(self._build_markdown_external_material_documentation(material, out_path))
         return lines
 
     def _build_markdown_bfield_results(
@@ -1028,7 +1330,7 @@ class ReportService:
         label_expected_ppms: dict[str, str],
         out_path: Path,
     ) -> list[str]:
-        lines = ["## 3. Simulation B_field results", ""]
+        lines = [self._md_heading("simulation-bfield-results", "3. Simulation B_field results", 1), ""]
         parent_path = self._common_parent_path(studies)
         if parent_path:
             lines.append(f"Path: {self._escape_md(parent_path)}")
@@ -1039,9 +1341,9 @@ class ReportService:
             lines.append("No selected FOV histogram label available for the chosen studies.")
             return lines
 
-        for label_index, label in enumerate(bfield_labels, start=1):
-            section_number = f"3.{label_index}"
-            lines.append(f"### {section_number} {label}")
+        for label in bfield_labels:
+            label_anchor = self._label_anchor(label)
+            lines.append(self._md_heading(label_anchor, label, 2))
             comment = label_comments.get(label, "").strip()
             if comment:
                 lines.append(f"Details: \"{self._escape_md(comment)}\"")
@@ -1049,11 +1351,11 @@ class ReportService:
             if expected_ppm:
                 lines.append(f"Expected ppms: {self._escape_md(expected_ppm)}")
             lines.append("")
-            lines.append(f"#### {section_number}.1 Table summary")
+            lines.append(self._md_heading(f"{label_anchor}-table", "Table summary", 3))
             lines.extend(self._build_markdown_summary_table(studies, label, selected_parameters))
             lines.append("")
-            lines.append(f"#### {section_number}.2 Plots")
-            lines.extend(self._build_markdown_bfield_plots(studies, label, out_path, section_number))
+            lines.append(self._md_heading(f"{label_anchor}-plots", "Plots", 3))
+            lines.extend(self._build_markdown_bfield_plots(studies, label, out_path))
             lines.append("")
         return lines
 
@@ -1093,16 +1395,15 @@ class ReportService:
             lines.append("| " + " | ".join(khz_row) + " |")
         return lines
 
-    def _build_markdown_bfield_plots(self, studies: list[SimulationStudyResult], label: str, out_path: Path, section_number: str) -> list[str]:
+    def _build_markdown_bfield_plots(self, studies: list[SimulationStudyResult], label: str, out_path: Path) -> list[str]:
         lines: list[str] = []
         found = False
-        for study in studies:
+        for study_index, study in enumerate(studies, start=1):
             domain = next((domain for domain in study.domains if domain.name == label), None)
             if domain is None:
                 continue
             found = True
-            plot_index = len([line for line in lines if line.startswith("##### ")]) + 1
-            lines.append(f"##### {section_number}.2.{plot_index} {study.folder_name}")
+            lines.append(self._md_heading(f"{self._label_anchor(label)}-plots-{study_index}", study.folder_name, 4))
             lines.extend(
                 self._md_image_grid(
                     [("3D Plot", domain.plot_3d, ""), ("Histogram", domain.histogram, "")],
@@ -1126,13 +1427,15 @@ class ReportService:
         return lines
 
     def _build_markdown_magnet_results(self, studies: list[SimulationStudyResult], selected_parameters: list[str], out_path: Path) -> list[str]:
-        lines = ["## 4. Simulation Magnet results", ""]
-        lines.append("### 4.1 Table summary")
+        normh_studies = self._normh_studies(studies)
+        lines = [self._md_heading("simulation-magnet-results", "4. Simulation Magnet results", 1), ""]
+        lines.append(self._md_heading("simulation-magnet-results-normm", "NormM", 2))
+        lines.append(self._md_heading("simulation-magnet-results-table", "Table summary", 3))
         lines.extend(self._build_markdown_magnet_summary_table(studies))
         lines.append("")
-        lines.append("### 4.2 Plots")
+        lines.append(self._md_heading("simulation-magnet-results-plots", "Plots", 3))
         for study_index, study in enumerate(studies, start=1):
-            lines.append(f"#### 4.2.{study_index} {study.folder_name}")
+            lines.append(self._md_heading(f"magnet-plots-{study_index}", study.folder_name, 4))
             lines.extend(
                 self._md_image_grid(
                     [("3D Plot", study.magnets.plot_3d, ""), ("Histogram", study.magnets.histogram, "")],
@@ -1148,7 +1451,43 @@ class ReportService:
                 )
             )
             lines.append("")
+
+        if normh_studies:
+            lines.append(self._md_heading("simulation-magnet-results-normh", "NormH", 2))
+            lines.append("")
+            for study_index, study in enumerate(normh_studies, start=1):
+                lines.append(self._md_heading(f"normh-plots-{study_index}", study.folder_name, 3))
+                lines.extend(self._md_image_grid([(None, study.magnets.normh_histogram, "")], out_path, columns=1))
+                lines.append("")
         return lines
+
+    def _bh_material_display_name(self, study: SimulationStudyResult) -> str:
+        material = study.material_curve
+        if material is not None and material.name:
+            return material.name
+        if study.material_name:
+            return study.material_name
+        return study.folder_name
+
+    def _normh_studies(self, studies: list[SimulationStudyResult]) -> list[SimulationStudyResult]:
+        selected: list[SimulationStudyResult] = []
+        for study in studies:
+            normh_path = study.magnets.normh_histogram
+            if not normh_path:
+                continue
+            path = Path(normh_path)
+            if path.exists():
+                selected.append(study)
+                continue
+
+            folder = Path(study.folder_path)
+            if not folder.exists() or not folder.is_dir():
+                continue
+            found = next((candidate for candidate in folder.rglob("*.png") if fnmatch.fnmatch(candidate.name.lower(), "magnets_histogram_normh_*_hfield.png")), None)
+            if found is not None:
+                study.magnets.normh_histogram = str(found)
+                selected.append(study)
+        return selected
 
     def _build_markdown_magnet_summary_table(self, studies: list[SimulationStudyResult]) -> list[str]:
         data = self._magnet_summary_table_content(studies)

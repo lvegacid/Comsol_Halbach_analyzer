@@ -15,7 +15,7 @@ from app.gui.dialogs.notion_token_dialog import NotionTokenDialog
 from app.gui.tabs.generate_tab import GenerateTab
 from app.gui.tabs.magnet_data_tab import MagnetDataTab
 from app.gui.tabs.simulation_results_tab import SimulationResultsTab
-from app.models.entities import AppSettings, MagnetMetrics, ReportPayload, SimulationStudyResult
+from app.models.entities import AppSettings, MagnetMetrics, MaterialCurve, ReportPayload, SimulationStudyResult
 from app.services.histogram_metrics_service import HistogramMetricsService
 from app.services.magnet_data_service import MagnetDataService
 from app.services.notion_service import NotionAuthenticationError, NotionService, NotionServiceError, NotionWorkspace
@@ -74,6 +74,10 @@ class MainWindow(QMainWindow):
             self.tab_magnet.other_info_edit.setPlainText(self._settings.last_other_information)
         if self._settings.last_simulation_parent:
             self.tab_sim.set_parent_folder(self._settings.last_simulation_parent)
+            self.tab_sim.restore_study_configs(
+                self._settings.last_simulation_parent,
+                self._settings.last_simulation_studies,
+            )
 
         self.tab_magnet.data_updated.connect(self.on_magnet_data_updated)
         self.tab_sim.studies_updated.connect(self.on_studies_or_materials_changed)
@@ -96,6 +100,7 @@ class MainWindow(QMainWindow):
         self._settings.comsol_version = self.tab_magnet.comsol_edit.text().strip() or "6.4"
         self._settings.last_txt_path = self.tab_magnet.txt_path_edit.text().strip()
         self._settings.last_simulation_parent = self.tab_sim.parent_folder_edit.text().strip()
+        self._settings.last_simulation_studies = self.tab_sim.export_study_configs()
         self._settings.last_project = self.tab_magnet.project_edit.text().strip()
         self._settings.last_magnet_characteristics = self.tab_magnet.magnet_characteristics_edit.text().strip()
         self._settings.last_expected_ppm = self.tab_magnet.expected_ppm_edit.text().strip()
@@ -121,6 +126,8 @@ class MainWindow(QMainWindow):
         self._refresh_export_defaults()
 
     def on_studies_or_materials_changed(self) -> None:
+        self._settings.last_simulation_studies = self.tab_sim.export_study_configs()
+        self._settings_service.save_settings(self._settings)
         self._refresh_available_labels()
         self._restore_summary_label_metadata()
 
@@ -128,7 +135,15 @@ class MainWindow(QMainWindow):
         selected_configs = self.tab_sim.get_selected_studies()
         studies = [self._simulation_service.build_study_result(cfg) for cfg in selected_configs]
         for study in studies:
-            study.material_curve = self._materials.get(study.material_name)
+            if study.external_material is not None:
+                study.material_curve = MaterialCurve(
+                    name=study.external_material.display_name,
+                    points=[],
+                    external_txt_path=study.external_material.external_txt_path,
+                    external_png_path=study.external_material.external_png_path,
+                )
+            else:
+                study.material_curve = self._materials.get(study.material_name)
             study.histogram_metrics = self._histogram_metrics_service.ensure_metrics_for_study(study)
         return studies
 

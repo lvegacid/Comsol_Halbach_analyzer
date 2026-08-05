@@ -66,7 +66,7 @@ class SimulationService:
 
             magnets_kind = self._parse_magnets_filename(base_name)
             if magnets_kind is not None:
-                slot = magnet_groups[base_name]
+                slot = magnet_groups["Magnets"]
                 if magnets_kind == "3dplot":
                     if projection_key:
                         slot[projection_key] = str(png)
@@ -74,6 +74,8 @@ class SimulationService:
                         slot["plot_3d"] = str(png)
                 elif magnets_kind == "histogram" and projection_key is None:
                     slot["histogram"] = str(png)
+                elif magnets_kind == "normh_histogram" and projection_key is None:
+                    slot["normh_histogram"] = str(png)
 
         magnets = self._build_magnets_figures(magnet_groups)
 
@@ -88,6 +90,7 @@ class SimulationService:
             folder_path=cfg.folder_path,
             symmetry=cfg.symmetry,
             material_name=cfg.material_name,
+            external_material=cfg.external_material,
             domains=domains,
             magnets=magnets,
         )
@@ -121,10 +124,12 @@ class SimulationService:
     def _build_magnets_figures(self, base_groups: dict[str, dict[str, str]]) -> MagnetsFigures:
         best_plot_group = self._select_best_plot_group(base_groups)
         histogram = self._first_present(base_groups, "histogram")
+        normh_histogram = self._first_present(base_groups, "normh_histogram")
 
         return MagnetsFigures(
             plot_3d=best_plot_group.get("plot_3d"),
             histogram=histogram,
+            normh_histogram=normh_histogram,
             projection_xy=best_plot_group.get("projection_xy"),
             projection_yz=best_plot_group.get("projection_yz"),
             projection_xz=best_plot_group.get("projection_xz"),
@@ -195,7 +200,9 @@ class SimulationService:
 
     def _parse_magnets_filename(self, stem: str) -> str | None:
         lower_name = stem.lower()
-        if lower_name.startswith("magnets_histogram"):
+        if lower_name.startswith("magnets_histogram_normh_") and lower_name.endswith("_hfield"):
+            return "normh_histogram"
+        if lower_name.startswith("magnets_histogram") and not lower_name.startswith("magnets_histogram_normh_"):
             return "histogram"
         if lower_name.startswith("magnets_"):
             return "3dplot"

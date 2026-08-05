@@ -27,6 +27,8 @@ class MaterialDialog(QDialog):
         self.setWindowTitle(f"Edit Material - {material_name}")
         self.resize(520, 420)
         self._material_name = material_name
+        self._external_txt_path = material.external_txt_path
+        self._external_png_path = material.external_png_path
 
         root = QVBoxLayout(self)
         meta_form = QFormLayout()
@@ -133,6 +135,8 @@ class MaterialDialog(QDialog):
             comment=self.comment_edit.toPlainText().strip(),
             links=links,
             images=images,
+            external_txt_path=self._external_txt_path,
+            external_png_path=self._external_png_path,
         )
 
     def _attach_images(self) -> None:

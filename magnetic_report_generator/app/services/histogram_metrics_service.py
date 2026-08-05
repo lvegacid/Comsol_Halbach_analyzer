@@ -121,22 +121,59 @@ class HistogramMetricsService:
     def _collect_magnets_histogram_txt(self, study: SimulationStudyResult) -> Path | None:
         if study.magnets.histogram:
             candidate = Path(study.magnets.histogram).with_suffix(".txt")
-            if candidate.exists():
+            if candidate.exists() and "normh" not in candidate.name.lower():
                 return candidate
 
         for txt_path in Path(study.folder_path).rglob("*.txt"):
-            if txt_path.name.lower().startswith("magnets_histogram") or txt_path.name.lower().startswith("main_magnets_histogram"):
+            lower_name = txt_path.name.lower()
+            if "normh" in lower_name:
+                continue
+            if lower_name.startswith("magnets_histogram") or lower_name.startswith("main_magnets_histogram"):
                 return txt_path
         return None
 
-    @staticmethod
-    def _infer_study_br_t(study: SimulationStudyResult) -> float:
+    def _infer_study_br_t(self, study: SimulationStudyResult) -> float:
         if study.material_curve and study.material_curve.points:
             try:
-                return max(float(point[1]) for point in study.material_curve.points)
+                values = [float(point[1]) for point in study.material_curve.points if np.isfinite(float(point[1]))]
+                positive = [value for value in values if value > 0.0]
+                if positive:
+                    return max(positive)
             except Exception:
                 pass
+
+        external_txt_path: Path | None = None
+        if study.material_curve and study.material_curve.external_txt_path:
+            external_txt_path = Path(study.material_curve.external_txt_path)
+        elif study.external_material and study.external_material.external_txt_path:
+            external_txt_path = Path(study.external_material.external_txt_path)
+
+        if external_txt_path is not None:
+            inferred = self._infer_br_t_from_external_txt(external_txt_path)
+            if inferred is not None and np.isfinite(inferred) and inferred > 0:
+                return float(inferred)
+
         return 1.4
+
+    @staticmethod
+    def _infer_br_t_from_external_txt(txt_path: Path) -> float | None:
+        if not txt_path.exists() or not txt_path.is_file():
+            return None
+        try:
+            content = txt_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return None
+
+        pattern = re.compile(r"^\s*Br\s*=?\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b")
+        for line in content.splitlines():
+            match = pattern.search(line)
+            if not match:
+                continue
+            try:
+                return float(match.group(1))
+            except Exception:
+                continue
+        return None
 
     def _compute_magnet_summary_from_script(self, histogram_txt: Path, br_t: float) -> MagnetHistogramSummary | None:
         if not histogram_txt.exists() or not self._magnets_script_path.exists():

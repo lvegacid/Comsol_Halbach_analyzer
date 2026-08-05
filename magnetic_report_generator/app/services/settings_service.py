@@ -76,6 +76,8 @@ class SettingsService:
             comment = ""
             links: list[str] = []
             images: list[AttachedImageInfo] = []
+            external_txt_path: str | None = None
+            external_png_path: str | None = None
 
             if isinstance(raw, dict):
                 raw_points = raw.get("points", [])
@@ -95,6 +97,11 @@ class SettingsService:
                             if not path:
                                 continue
                             images.append(AttachedImageInfo(path=path, comment=str(item.get("comment", "") or "")))
+
+                raw_external_txt = str(raw.get("external_txt_path", "") or "").strip()
+                raw_external_png = str(raw.get("external_png_path", "") or "").strip()
+                external_txt_path = raw_external_txt or None
+                external_png_path = raw_external_png or None
             else:
                 # Backward compatibility with legacy schema: material -> [[h, b], ...]
                 raw_points = raw
@@ -102,7 +109,15 @@ class SettingsService:
             for row in raw_points:
                 if isinstance(row, list) and len(row) >= 2:
                     parsed_points.append((float(row[0]), float(row[1])))
-            materials[name] = MaterialCurve(name=name, points=parsed_points, comment=comment, links=links, images=images)
+            materials[name] = MaterialCurve(
+                name=name,
+                points=parsed_points,
+                comment=comment,
+                links=links,
+                images=images,
+                external_txt_path=external_txt_path,
+                external_png_path=external_png_path,
+            )
         return materials
 
     def save_materials(self, materials: dict[str, MaterialCurve]) -> None:
@@ -112,6 +127,8 @@ class SettingsService:
                 "comment": mat.comment,
                 "links": list(mat.links),
                 "images": [{"path": img.path, "comment": img.comment} for img in mat.images],
+                "external_txt_path": mat.external_txt_path or "",
+                "external_png_path": mat.external_png_path or "",
             }
             for name, mat in materials.items()
         }

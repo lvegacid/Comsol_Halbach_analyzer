@@ -50,6 +50,17 @@ class MaterialCurve:
     comment: str = ""
     links: list[str] = field(default_factory=list)
     images: list[AttachedImageInfo] = field(default_factory=list)
+    external_txt_path: str | None = None
+    external_png_path: str | None = None
+
+
+@dataclass(slots=True)
+class ExternalMaterialSelection:
+    display_name: str
+    folder_path: str
+    external_txt_path: str | None = None
+    external_png_path: str | None = None
+    is_external: bool = True
 
 
 @dataclass(slots=True)
@@ -59,6 +70,7 @@ class SimulationStudyConfig:
     selected: bool = False
     symmetry: str = "No"
     material_name: str = ""
+    external_material: ExternalMaterialSelection | None = None
 
 
 @dataclass(slots=True)
@@ -77,6 +89,7 @@ class DomainFigures:
 class MagnetsFigures:
     plot_3d: str | None = None
     histogram: str | None = None
+    normh_histogram: str | None = None
     projection_xy: str | None = None
     projection_yz: str | None = None
     projection_xz: str | None = None
@@ -102,6 +115,7 @@ class SimulationStudyResult:
     folder_path: str
     symmetry: str
     material_name: str
+    external_material: ExternalMaterialSelection | None = None
     material_curve: MaterialCurve | None = None
     domains: list[DomainFigures] = field(default_factory=list)
     magnets: MagnetsFigures = field(default_factory=MagnetsFigures)
@@ -127,6 +141,7 @@ class AppSettings:
     comsol_version: str = "6.4"
     last_txt_path: str = ""
     last_simulation_parent: str = ""
+    last_simulation_studies: list[dict[str, Any]] = field(default_factory=list)
     last_pdf_export_path: str = ""
     last_project: str = ""
     last_magnet_characteristics: str = ""
@@ -150,6 +165,7 @@ class AppSettings:
             "comsol_version": self.comsol_version,
             "last_txt_path": self.last_txt_path,
             "last_simulation_parent": self.last_simulation_parent,
+            "last_simulation_studies": [dict(item) for item in self.last_simulation_studies],
             "last_pdf_export_path": self.last_pdf_export_path,
             "last_project": self.last_project,
             "last_magnet_characteristics": self.last_magnet_characteristics,
@@ -175,6 +191,11 @@ class AppSettings:
             comsol_version=str(data.get("comsol_version", "6.4")),
             last_txt_path=str(data.get("last_txt_path", "")),
             last_simulation_parent=str(data.get("last_simulation_parent", "")),
+            last_simulation_studies=[
+                dict(item)
+                for item in data.get("last_simulation_studies", [])
+                if isinstance(item, dict)
+            ],
             last_pdf_export_path=str(data.get("last_pdf_export_path", "")),
             last_project=str(data.get("last_project", "")),
             last_magnet_characteristics=str(data.get("last_magnet_characteristics", "")),

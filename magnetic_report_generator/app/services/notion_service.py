@@ -547,11 +547,6 @@ class NotionService:
         i = 0
         toc_inserted = False
         skipping_index = False
-        current_major_section = 0
-        bh_study_index = 0
-        in_bfield_plots = False
-        bfield_plot_index = 0
-        current_bfield_plot_prefix = ""
         while i < len(lines):
             line = lines[i].rstrip()
             stripped = line.strip()
@@ -572,21 +567,6 @@ class NotionService:
                 i += 1
                 continue
 
-            # Promote per-study labels in "3.1.2 Plots" to heading_3 blocks.
-            if in_bfield_plots and not stripped.startswith(("#", "- ", "|", "<table>", "```")):
-                look_ahead = i + 1
-                while look_ahead < len(lines) and not lines[look_ahead].strip():
-                    look_ahead += 1
-                if (
-                    stripped.lower() != "no plots found."
-                    and look_ahead < len(lines)
-                    and lines[look_ahead].strip().startswith("<table>")
-                ):
-                    bfield_plot_index += 1
-                    blocks.append(self._heading_block(3, f"{current_bfield_plot_prefix}.{bfield_plot_index} {stripped}"))
-                    i += 1
-                    continue
-
             if stripped.startswith("```"):
                 i += 1
                 code_lines: list[str] = []
@@ -603,70 +583,15 @@ class NotionService:
                 markdown_level = len(heading_match.group(1))
                 heading_text = heading_match.group(2).strip()
 
-                if markdown_level == 2:
-                    if not toc_inserted:
-                        blocks.append(self._table_of_contents_block())
-                        toc_inserted = True
+                if re.match(r"^\d+(?:\.\d+)*\.?\s+", heading_text) and not toc_inserted:
+                    blocks.append(self._table_of_contents_block())
+                    toc_inserted = True
 
-                    normalized = heading_text.replace("Simulation B_field results", "Simulation B-field results")
-                    if normalized.startswith("1. "):
-                        current_major_section = 1
-                    elif normalized.startswith("2. "):
-                        current_major_section = 2
-                        bh_study_index = 0
-                    elif normalized.startswith("3. "):
-                        current_major_section = 3
-                    elif normalized.startswith("4. "):
-                        current_major_section = 4
-                    else:
-                        current_major_section = 0
-
-                    in_bfield_plots = False
-                    bfield_plot_index = 0
-                    blocks.append(self._heading_block(1, normalized))
-                    i += 1
-                    continue
-
-                if markdown_level == 3:
-                    in_bfield_plots = False
-                    normalized = heading_text
-                    if current_major_section == 1:
-                        if heading_text == "Geometry":
-                            normalized = "1.1 Geometry"
-                        elif heading_text == "Rings":
-                            normalized = "1.2 Rings"
-                        elif heading_text == "Other information images":
-                            blocks.append(self._paragraph_block("Other information images"))
-                            i += 1
-                            continue
-                    elif current_major_section == 2:
-                        bh_study_index += 1
-                        normalized = f"2.{bh_study_index} {heading_text}"
-
-                    blocks.append(self._heading_block(2, normalized))
-                    i += 1
-                    continue
-
-                if markdown_level >= 4:
-                    if heading_text.startswith("Material:"):
-                        blocks.append(self._paragraph_block(heading_text))
-                        i += 1
-                        continue
-
-                    plot_heading_match = re.match(r"^(\d+\.\d+)\.2\s+Plots$", heading_text)
-                    if plot_heading_match:
-                        in_bfield_plots = True
-                        bfield_plot_index = 0
-                        current_bfield_plot_prefix = f"{plot_heading_match.group(1)}.2"
-                    else:
-                        in_bfield_plots = False
-
-                    if markdown_level == 4 and re.match(r"^\d+\.\d+\.\d+\s+(Table summary|Plots)$", heading_text):
-                        blocks.append(self._heading_block(2, heading_text))
-                    else:
-                        blocks.append(self._heading_block(3, heading_text))
-                    i += 1
-                    continue
+                normalized = heading_text.replace("Simulation B_field results", "Simulation B-field results")
+                notion_level = min(max(markdown_level, 1), 6)
+                blocks.append(self._heading_block(notion_level, normalized))
+                i += 1
+                continue
 
             if stripped.startswith("<table>"):
                 html_lines: list[str] = []
@@ -1128,12 +1053,22 @@ class NotionService:
         }
 
     def _heading_block(self, level: int, text: str) -> dict[str, Any]:
-        block_type = {1: "heading_1", 2: "heading_2", 3: "heading_3"}.get(level, "heading_3")
+        block_type = {
+            1: "heading_1",
+            2: "heading_2",
+            3: "heading_3",
+            4: "heading_4",
+            5: "heading_5",
+            6: "heading_6",
+        }.get(level, "heading_6")
+
         return {
             "object": "block",
             "type": block_type,
-            block_type: {"rich_text": [self._text_obj(text)]},
-        }
+            block_type: {
+                "rich_text": [self._text_obj(text)],
+            },
+    }
 
     def _paragraph_block(self, text: str) -> dict[str, Any]:
         return {
