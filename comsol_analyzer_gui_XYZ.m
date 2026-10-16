@@ -1,0 +1,2289 @@
+function comsol_analyzer_gui_XYZ()
+% comsol_analyzer_gui  GUI principal para COMSOL Analyzer.
+%
+% Crea una interfaz gráfica programática (uifigure) que permite:
+%   - Seleccionar un archivo .mph mediante diálogo o ruta manual
+%   - Seleccionar un directorio de salida
+%   - Descubrir y seleccionar datasets del modelo COMSOL cargado
+%   - Ejecutar la extracción BFOV para los datasets seleccionados
+%
+% Uso:
+%   comsol_analyzer_gui()
+%
+% Requisitos: 1.1, 1.2, 1.3, 1.4, 1.5, 2.1–2.6, 4.1, 4.5, 6.3–6.5
+
+% -------------------------------------------------------------------------
+% Task 8.1 — Crear figura y controles base
+% -------------------------------------------------------------------------
+
+fig = uifigure('Name', 'COMSOL Analyzer', ...
+               'Position', [100 60 760 815], ...
+               'Resize', 'on', ...
+               'AutoResizeChildren', 'off');
+fig.CloseRequestFcn = @closeMainFigure;
+
+prefGroup = 'ComsolAnalyzer';
+lastMphPath = getpref(prefGroup, 'LastMphPath', '');
+lastMphDir = getpref(prefGroup, 'LastMphDir', '');
+lastOutputDir = getpref(prefGroup, 'LastOutputDir', '');
+lastFieldAxis = getpref(prefGroup, 'LastFieldAxis', 'Y');
+if ~ismember(lastFieldAxis, {'X', 'Y', 'Z'})
+    lastFieldAxis = 'Y';
+end
+
+% Estado compartido almacenado en UserData de la figura
+state.model    = [];      % objeto modelo COMSOL cargado
+state.datasets = [];      % struct array con .tag y .label
+state.connection = [];    % estado de conexion LiveLink
+state.isClosing = false;  % evita callbacks durante el cierre
+state.childDialogs = {};  % dialogos hijos abiertos desde la GUI
+state.heartbeatTimer = []; % timer de keep-alive durante extracciones largas
+fig.UserData   = state;
+
+% --- Panel: LiveLink Connection ---
+btnCheckConnection = uibutton(fig, 'push', ...
+    'Text', 'Check / Connect LiveLink', ...
+    'Position', [20 520 170 26], ...
+    'FontWeight', 'bold');
+
+lblConnection = uilabel(fig, 'Text', 'LiveLink connection status:', ...
+    'Position', [210 522 155 22], 'FontWeight', 'bold');
+
+connectionStatusLabel = uilabel(fig, ...
+    'Text', 'Unknown', ...
+    'Position', [370 522 310 22], ...
+    'FontWeight', 'bold', ...
+    'FontColor', [0.45 0.45 0.45]);
+
+% --- Panel: MPH File ---
+lblMph = uilabel(fig, 'Text', 'MPH File:', ...
+    'Position', [20 480 80 22], 'FontWeight', 'bold');
+
+mphField = uieditfield(fig, 'text', ...
+    'Position', [105 480 460 22], ...
+    'Placeholder', 'Ruta al archivo .mph...', ...
+    'Value', lastMphPath);
+
+btnBrowseMph = uibutton(fig, 'push', ...
+    'Text', 'Browse MPH', ...
+    'Position', [575 480 105 22]);
+
+% --- Panel: Output Directory ---
+lblOutput = uilabel(fig, 'Text', 'Output Dir:', ...
+    'Position', [20 445 80 22], 'FontWeight', 'bold');
+
+outputField = uieditfield(fig, 'text', ...
+    'Position', [105 445 460 22], ...
+    'Placeholder', 'Directorio de salida...', ...
+    'Value', lastOutputDir);
+
+btnBrowseOut = uibutton(fig, 'push', ...
+    'Text', 'Browse Output', ...
+    'Position', [575 445 105 22]);
+
+% --- Panel: FOV Info (texto libre para postproceso Python) ---
+lblFov = uilabel(fig, 'Text', 'FOV Info:', ...
+    'Position', [20 410 80 22], 'FontWeight', 'bold');
+
+fovInfoField = uieditfield(fig, 'text', ...
+    'Position', [105 410 575 22], ...
+    'Placeholder', 'Ej: Sphere(340 mm)');
+
+% --- Panel: Field Axis (eje del campo B a extraer) ---
+lblAxis = uilabel(fig, 'Text', 'Field axis (B):', ...
+    'Position', [20 375 100 22], 'FontWeight', 'bold');
+
+axisDropdown = uidropdown(fig, ...
+    'Items', {'X', 'Y', 'Z'}, ...
+    'Value', lastFieldAxis, ...
+    'Position', [125 375 80 22]);
+
+% --- Panel: Datasets ---
+lblDatasets = uilabel(fig, 'Text', 'Datasets disponibles:', ...
+    'Position', [20 380 200 22], 'FontWeight', 'bold');
+
+datasetList = uilistbox(fig, ...
+    'Position', [20 230 660 145], ...
+    'Items', {}, ...
+    'MultiSelect', 'on');
+
+% --- Botones principales ---
+btnRunGeometry = uibutton(fig, 'push', ...
+    'Text', 'Extract Geometry Plots', ...
+    'Position', [180 205 170 30], ...
+    'Enable', 'on', ...
+    'FontWeight', 'bold');
+
+btnRun = uibutton(fig, 'push', ...
+    'Text', 'Run Extraction', ...
+    'Position', [20 205 150 30], ...
+    'Enable', 'off', ...
+    'FontWeight', 'bold');
+
+% --- Opciones de salida ---
+chkBfov3D = uicheckbox(fig, ...
+    'Text', 'B_FOV 3D Plot', ...
+    'Position', [20 173 220 22], ...
+    'Value', true);
+
+chkProjectionScale = uicheckbox(fig, ...
+    'Text', 'Change orthoscale for projections', ...
+    'Position', [250 173 250 22], ...
+    'Value', false);
+
+chkBfovHist = uicheckbox(fig, ...
+    'Text', 'B_FOV Histogram', ...
+    'Position', [20 149 220 22], ...
+    'Value', true);
+
+chkBfovCoord = uicheckbox(fig, ...
+    'Text', 'B_FOV Custom Coordinates', ...
+    'Position', [20 125 250 22], ...
+    'Value', false);
+
+chkChangeDefaultFov = uicheckbox(fig, ...
+    'Text', 'Change default FOV', ...
+    'Position', [20 101 220 22], ...
+    'Value', false);
+
+chkMagnets3D = uicheckbox(fig, ...
+    'Text', 'Magnets 3D Plot', ...
+    'Position', [20 77 220 22], ...
+    'Value', false);
+
+chkMagnetsHist = uicheckbox(fig, ...
+    'Text', 'Magnets Histogram', ...
+    'Position', [20 53 220 22], ...
+    'Value', false);
+
+% --- Panel: Log ---
+lblLog = uilabel(fig, 'Text', 'Log:', ...
+    'Position', [20 88 60 22], 'FontWeight', 'bold');
+
+btnCopyLog = uibutton(fig, 'push', ...
+    'Text', 'Copy Log', ...
+    'Position', [575 88 105 22]);
+
+logArea = uitextarea(fig, ...
+    'Position', [20 20 660 65], ...
+    'Editable', 'on', ...
+    'Value', '');
+
+% -------------------------------------------------------------------------
+% Callback "Check / Connect LiveLink"
+% -------------------------------------------------------------------------
+btnCheckConnection.ButtonPushedFcn = @(~,~) checkConnectionCallback();
+
+% -------------------------------------------------------------------------
+% Task 8.3 — Callback "Browse MPH"
+% -------------------------------------------------------------------------
+btnBrowseMph.ButtonPushedFcn = @(~,~) browseMphCallback();
+
+% -------------------------------------------------------------------------
+% Task 8.4 — Validación manual de ruta MPH (foco perdido / Enter)
+% -------------------------------------------------------------------------
+mphField.ValueChangedFcn = @(src,~) validateMphPath(src.Value);
+
+% -------------------------------------------------------------------------
+% Task 8.7 — Callback "Browse Output"
+% -------------------------------------------------------------------------
+btnBrowseOut.ButtonPushedFcn = @(~,~) browseOutputCallback();
+
+% -------------------------------------------------------------------------
+% Task 8.8 — Callback "Run Extraction"
+% -------------------------------------------------------------------------
+btnRun.ButtonPushedFcn = @(~,~) runExtractionCallback();
+btnRunGeometry.ButtonPushedFcn = @(~,~) runGeometryPlotsCallback();
+
+% -------------------------------------------------------------------------
+% Callback "Copy Log"
+% -------------------------------------------------------------------------
+btnCopyLog.ButtonPushedFcn = @(~,~) copyLogCallback();
+
+% Persistir la última selección de eje de campo (X/Y/Z)
+axisDropdown.ValueChangedFcn = @(src,~) setpref(prefGroup, 'LastFieldAxis', src.Value);
+
+% Refrescar estado del botón Run cuando cambian opciones
+chkBfov3D.ValueChangedFcn = @(~,~) updateRunButtonState();
+chkBfovHist.ValueChangedFcn = @(~,~) updateRunButtonState();
+chkBfovCoord.ValueChangedFcn = @(~,~) updateRunButtonState();
+chkChangeDefaultFov.ValueChangedFcn = @(~,~) updateRunButtonState();
+chkMagnets3D.ValueChangedFcn = @(~,~) updateRunButtonState();
+chkMagnetsHist.ValueChangedFcn = @(~,~) updateRunButtonState();
+
+% Layout responsivo para log y datasets
+fig.SizeChangedFcn = @(~,~) layoutControls();
+
+% =========================================================================
+% Funciones internas (closures)
+% =========================================================================
+
+    function layoutControls()
+        if isFigureClosing()
+            return;
+        end
+
+        p = fig.Position;
+        figW = p(3);
+        figH = p(4);
+
+        left = 20;
+        right = 20;
+        top = 18;
+        bottom = 20;
+
+        browseW = 105;
+        labelW = 80;
+        gap = 10;
+
+        xLabel = left;
+        xField = 105;
+        xBrowse = figW - right - browseW;
+        fieldW = max(140, xBrowse - gap - xField);
+        wideW = max(240, figW - left - right);
+
+        yConn = figH - top - 26;
+        yMph = yConn - 42;
+        yOut = yMph - 35;
+        yFov = yOut - 35;
+        yAxis = yFov - 35;
+        yDatasetLabel = yAxis - 34;
+
+        % Dataset list: ajustado al numero real de items para evitar espacio muerto.
+        nItems = numel(datasetList.Items);
+        visibleRows = min(max(nItems, 2), 6);
+        desiredDatasetH = 18 + visibleRows * 22;
+        desiredDatasetH = min(max(desiredDatasetH, 62), 170);
+
+        minLogH = 190;
+        minRunY = bottom + minLogH + 165;
+        datasetTop = yDatasetLabel - 6;
+        maxDatasetHBySpace = max(60, datasetTop - (minRunY + 38));
+        datasetH = min(desiredDatasetH, maxDatasetHBySpace);
+        datasetY = datasetTop - datasetH;
+
+        runY = datasetY - 38;
+        chk3DY = runY - 32;
+        chkHistY = chk3DY - 24;
+        chkCoordY = chkHistY - 24;
+        chkDomainY = chkCoordY - 24;
+        chkMag3DY = chkDomainY - 24;
+        chkMagHistY = chkMag3DY - 24;
+        logLabelY = chkMagHistY - 34;
+        logH = max(minLogH, logLabelY - 3 - bottom);
+
+        btnCheckConnection.Position = [left yConn 170 26];
+        lblConnection.Position = [left + 190 yConn + 2 155 22];
+        connectionStatusLabel.Position = [left + 350 yConn + 2 max(120, figW - right - (left + 350)) 22];
+
+        lblMph.Position = [xLabel yMph labelW 22];
+        mphField.Position = [xField yMph fieldW 22];
+        btnBrowseMph.Position = [xBrowse yMph browseW 22];
+
+        lblOutput.Position = [xLabel yOut labelW 22];
+        outputField.Position = [xField yOut fieldW 22];
+        btnBrowseOut.Position = [xBrowse yOut browseW 22];
+
+        lblFov.Position = [xLabel yFov labelW 22];
+        fovInfoField.Position = [xField yFov max(240, figW - right - xField) 22];
+
+        lblAxis.Position = [xLabel yAxis 100 22];
+        axisDropdown.Position = [125 yAxis 80 22];
+
+        lblDatasets.Position = [left yDatasetLabel 260 22];
+        datasetList.Position = [left datasetY wideW datasetH];
+
+        btnRun.Position = [left runY 150 30];
+        btnRunGeometry.Position = [left + 160 runY 170 30];
+        chkBfov3D.Position = [left chk3DY 220 22];
+        chkProjectionScale.Position = [left + 230 chk3DY 250 22];
+        chkBfovHist.Position = [left chkHistY 220 22];
+        chkBfovCoord.Position = [left chkCoordY 250 22];
+        chkChangeDefaultFov.Position = [left chkDomainY 220 22];
+        chkMagnets3D.Position = [left chkMag3DY 220 22];
+        chkMagnetsHist.Position = [left chkMagHistY 220 22];
+
+        lblLog.Position = [left logLabelY 60 22];
+        btnCopyLog.Position = [xBrowse logLabelY browseW 22];
+        logArea.Position = [left bottom wideW logH];
+    end
+
+    function clearLoadedModel()
+        if ~isvalid(fig)
+            return;
+        end
+
+        s = fig.UserData;
+        s.model = [];
+        s.datasets = [];
+        fig.UserData = s;
+        populateDatasets([]);
+        updateRunButtonState();
+    end
+
+    function updateRunButtonState()
+        if isFigureClosing() || ~isvalid(btnRun)
+            return;
+        end
+
+        s = fig.UserData;
+        hasModel = ~isempty(s.model);
+        hasDatasets = ~isempty(s.datasets);
+        hasOutputOption = logical(chkBfov3D.Value) || logical(chkBfovHist.Value) || ...
+            logical(chkBfovCoord.Value) || logical(chkMagnets3D.Value) || logical(chkMagnetsHist.Value);
+
+        % Cuando se activa "Change default FOV", las salidas se eligen en el dialogo modal.
+        if logical(chkChangeDefaultFov.Value)
+            hasOutputOption = true;
+        end
+
+        if hasModel && hasDatasets && hasOutputOption
+            btnRun.Enable = 'on';
+        else
+            btnRun.Enable = 'off';
+        end
+    end
+
+    function updateConnectionIndicator(status, shouldLog)
+        if nargin < 2
+            shouldLog = false;
+        end
+
+        if isFigureClosing() || ~isvalid(connectionStatusLabel)
+            return;
+        end
+
+        if status.connected
+            connectionStatusLabel.Text = ['Connected - ' status.message];
+            connectionStatusLabel.FontColor = [0.00 0.45 0.20];
+        else
+            connectionStatusLabel.Text = ['Disconnected - ' status.message];
+            connectionStatusLabel.FontColor = [0.75 0.10 0.10];
+        end
+
+        s = fig.UserData;
+        s.connection = status;
+        fig.UserData = s;
+
+        if shouldLog
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            if status.connected
+                appendLog('INFO', ts, '', ['Estado LiveLink: ' status.message]);
+            else
+                appendLog('WARN', ts, '', ['Estado LiveLink: ' status.message]);
+                if ~isempty(status.detail)
+                    appendLog('WARN', ts, '', ['Detalle LiveLink: ' status.detail]);
+                end
+            end
+        end
+    end
+
+    function status = refreshConnectionStatus(action, shouldLog)
+        if nargin < 1 || isempty(action)
+            action = 'status';
+        end
+        if nargin < 2
+            shouldLog = false;
+        end
+
+        status = comsol_livelink_connection(action);
+        updateConnectionIndicator(status, shouldLog);
+    end
+
+    % --- Añadir línea al log ---
+    function appendLog(level, timestamp, datasetTag, message)
+        if isFigureClosing() || ~isvalid(logArea)
+            return;
+        end
+
+        if nargin == 1
+            % Llamada simple: appendLog('texto')
+            line = level;
+        else
+            line = sprintf('[%s] [%s] [%s] %s', timestamp, level, datasetTag, message);
+        end
+        current = logArea.Value;
+        if ischar(current)
+            current = {current};
+        elseif isstring(current)
+            current = cellstr(current);
+        end
+        if isempty(current) || (numel(current) == 1 && isempty(current{1}))
+            logArea.Value = {line};
+        else
+            logArea.Value = [current; {line}];
+        end
+        % Scroll al final
+        scroll(logArea, 'bottom');
+        drawnow;
+    end
+
+    % --- Poblar lista de datasets ---
+    function populateDatasets(datasets)
+        if isFigureClosing() || ~isvalid(datasetList)
+            return;
+        end
+
+        s = fig.UserData;
+        s.datasets = datasets;
+        fig.UserData = s;
+
+        if isempty(datasets)
+            datasetList.Items = {};
+            datasetList.Value = {};
+            layoutControls();
+            updateRunButtonState();
+            return;
+        end
+
+        items = cell(numel(datasets), 1);
+        for k = 1:numel(datasets)
+            items{k} = sprintf('%s: %s', datasets(k).tag, datasets(k).label);
+        end
+        datasetList.Items = items;
+        datasetList.Value = items;
+        layoutControls();
+        updateRunButtonState();
+    end
+
+    % --- Cargar modelo y datasets desde una ruta MPH ---
+    function loadModelFromPath(mphPath)
+        % Limpiar estado previo
+        clearLoadedModel();
+
+        status = refreshConnectionStatus('status', true);
+        if ~status.connected
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('WARN', ts, '', ...
+                'LiveLink reporta desconexión. Se intentará cargar el modelo igualmente.');
+        end
+
+        % Cargar modelo
+        try
+            mdl = load_model(mphPath);
+        catch err
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('ERROR', ts, '', err.message);
+            return;
+        end
+
+        % Obtener datasets
+        try
+            datasets = get_datasets(mdl);
+        catch err
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('ERROR', ts, '', err.message);
+            return;
+        end
+
+        % Guardar modelo en estado
+        s = fig.UserData;
+        s.model = mdl;
+        fig.UserData = s;
+
+        if isempty(datasets)
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('WARN', ts, '', 'No se encontraron datasets en el modelo.');
+            updateRunButtonState();
+        else
+            populateDatasets(datasets);
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('INFO', ts, '', sprintf('Modelo cargado. %d dataset(s) encontrado(s).', numel(datasets)));
+            updateRunButtonState();
+        end
+    end
+
+    % -----------------------------------------------------------------
+    % Callback de estado / conexion LiveLink
+    % -----------------------------------------------------------------
+    function checkConnectionCallback()
+        if isFigureClosing()
+            return;
+        end
+
+        refreshConnectionStatus('connect', true);
+        updateRunButtonState();
+    end
+
+    % -----------------------------------------------------------------
+    % Task 8.3 — Browse MPH callback
+    % -----------------------------------------------------------------
+    function browseMphCallback()
+        if isFigureClosing()
+            return;
+        end
+
+        % Bring figure to front and flush event queue before opening dialog
+        figure(fig);
+        drawnow;
+
+        startPath = '';
+        currentMph = strtrim(mphField.Value);
+        if ~isempty(currentMph)
+            if isfile(currentMph)
+                startPath = currentMph;
+            else
+                curDir = fileparts(currentMph);
+                if ~isempty(curDir) && isfolder(curDir)
+                    startPath = curDir;
+                end
+            end
+        end
+        if isempty(startPath) && ~isempty(lastMphPath) && isfile(lastMphPath)
+            startPath = lastMphPath;
+        end
+        if isempty(startPath) && ~isempty(lastMphDir) && isfolder(lastMphDir)
+            startPath = lastMphDir;
+        end
+
+        [fname, fpath] = uigetfile({'*.mph','COMSOL Model (*.mph)'}, ...
+                                   'Seleccionar archivo MPH', startPath);
+        % Restore focus to uifigure after dialog closes
+        figure(fig);
+        drawnow;
+        if isequal(fname, 0)
+            return;  % usuario canceló
+        end
+        fullPath = fullfile(fpath, fname);
+        setpref(prefGroup, 'LastMphPath', fullPath);
+        setpref(prefGroup, 'LastMphDir', fpath);
+        lastMphPath = fullPath;
+        lastMphDir = fpath;
+        mphField.Value = fullPath;
+        loadModelFromPath(fullPath);
+    end
+
+    % -----------------------------------------------------------------
+    % Task 8.4 — Validación manual de ruta MPH
+    % -----------------------------------------------------------------
+    function validateMphPath(mphPath)
+        if isFigureClosing()
+            return;
+        end
+
+        mphPath = strtrim(mphPath);
+        if isempty(mphPath)
+            return;
+        end
+
+        [~, ~, ext] = fileparts(mphPath);
+        if ~strcmpi(ext, '.mph')
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('ERROR', ts, '', ...
+                sprintf('Ruta inválida: la extensión "%s" no es .mph.', ext));
+            btnRun.Enable = 'off';
+            return;
+        end
+
+        if ~isfile(mphPath)
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('ERROR', ts, '', ...
+                sprintf('Ruta inválida: el archivo no existe: %s', mphPath));
+            btnRun.Enable = 'off';
+            return;
+        end
+
+        % Ruta válida — cargar modelo
+        setpref(prefGroup, 'LastMphPath', mphPath);
+        mphDir = fileparts(mphPath);
+        if ~isempty(mphDir)
+            setpref(prefGroup, 'LastMphDir', mphDir);
+            lastMphDir = mphDir;
+        end
+        lastMphPath = mphPath;
+        loadModelFromPath(mphPath);
+    end
+
+    % -----------------------------------------------------------------
+    % Task 8.7 — Browse Output callback
+    % -----------------------------------------------------------------
+    function browseOutputCallback()
+        if isFigureClosing()
+            return;
+        end
+
+        figure(fig);
+        drawnow;
+
+        startDir = '';
+        currentOut = strtrim(outputField.Value);
+        if ~isempty(currentOut) && isfolder(currentOut)
+            startDir = currentOut;
+        elseif ~isempty(lastOutputDir) && isfolder(lastOutputDir)
+            startDir = lastOutputDir;
+        end
+
+        if isempty(startDir)
+            selDir = uigetdir('', 'Seleccionar directorio de salida');
+        else
+            selDir = uigetdir(startDir, 'Seleccionar directorio de salida');
+        end
+        figure(fig);
+        drawnow;
+        if isequal(selDir, 0)
+            return;  % usuario canceló
+        end
+        setpref(prefGroup, 'LastOutputDir', selDir);
+        lastOutputDir = selDir;
+        outputField.Value = selDir;
+    end
+
+    % -----------------------------------------------------------------
+    % Task 8.8 — Run Extraction callback
+    % -----------------------------------------------------------------
+    function runExtractionCallback()
+        if isFigureClosing()
+            return;
+        end
+
+        status = refreshConnectionStatus('status', false);
+        if ~status.connected
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('WARN', ts, '', ...
+                'LiveLink no esta conectado. Verifica COMSOL with MATLAB y vuelve a intentar.');
+            updateRunButtonState();
+            return;
+        end
+
+        % Verificar selección de datasets
+        selectedItems = datasetList.Value;
+        if isempty(selectedItems)
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('WARN', ts, '', ...
+                'Debe seleccionar al menos un dataset antes de ejecutar la extracción.');
+            return;
+        end
+
+        % Verificar directorio de salida
+        outputDir = strtrim(outputField.Value);
+        if isempty(outputDir)
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('WARN', ts, '', ...
+                'Debe especificar un directorio de salida.');
+            return;
+        end
+
+        if isfolder(outputDir)
+            setpref(prefGroup, 'LastOutputDir', outputDir);
+            lastOutputDir = outputDir;
+        end
+
+        % Obtener modelo y datasets del estado
+        s = fig.UserData;
+        mdl      = s.model;
+        allDsets = s.datasets;
+
+        if isempty(mdl)
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('WARN', ts, '', 'No hay modelo cargado.');
+            return;
+        end
+
+        % Mapear items seleccionados → structs de dataset
+        if ischar(selectedItems)
+            selectedItems = {selectedItems};
+        end
+        selectedDatasets = struct('tag', {}, 'label', {}, 'shortLabel', {});
+        for k = 1:numel(selectedItems)
+            item = selectedItems{k};
+            % Formato: "<tag>: <label>"
+            colonIdx = strfind(item, ': ');
+            if ~isempty(colonIdx)
+                tag = strtrim(item(1:colonIdx(1)-1));
+            else
+                tag = strtrim(item);
+            end
+            % Buscar en allDsets
+            for j = 1:numel(allDsets)
+                if strcmp(allDsets(j).tag, tag)
+                    selectedDatasets(end+1) = allDsets(j); %#ok<AGROW>
+                    break;
+                end
+            end
+        end
+
+        if isempty(selectedDatasets)
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('WARN', ts, '', 'No se pudieron resolver los datasets seleccionados.');
+            return;
+        end
+
+        % Derivar modelName desde la ruta MPH
+        mphPath = strtrim(mphField.Value);
+        [~, modelName, ~] = fileparts(mphPath);
+
+        [canWriteOutput, outputMessage] = validate_output_directory(outputDir, modelName);
+        if ~canWriteOutput
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('ERROR', ts, '', outputMessage);
+            appendLog('WARN', ts, '', ...
+                'Selecciona una carpeta local con permisos de escritura y vuelve a ejecutar.');
+            return;
+        end
+
+        % Metadata para postproceso Python
+        fovInfo = strtrim(fovInfoField.Value);
+        if isempty(fovInfo)
+            fovInfo = 'N/A';
+        end
+
+        % Opciones de salida seleccionadas
+        options = struct();
+        options.enable3DPlot = logical(chkBfov3D.Value);
+        options.enableHistogram = logical(chkBfovHist.Value);
+        options.enableCustomCoordinates = logical(chkBfovCoord.Value);
+        options.enableMagnets3DPlot = logical(chkMagnets3D.Value);
+        options.enableMagnetsHistogram = logical(chkMagnetsHist.Value);
+        options.connectionRecoveryFn = @recoverLiveLinkAndReloadModel;
+        options.projectionOrthoScale = getpref('ComsolAnalyzer', 'ProjectionOrthoScale', 0.35);
+        % Eje del campo B a extraer ('X' | 'Y' | 'Z'). Por defecto 'Y'.
+        % NOTA: extraction_controller.m (y las funciones que llame para
+        % construir B_FOV / B_Domain, p.ej. algo como mfnc.By) deben leer
+        % options.fieldAxis y usar la componente correspondiente
+        % (mfnc.Bx / mfnc.By / mfnc.Bz) en vez de tener 'Y' fija.
+        options.fieldAxis = axisDropdown.Value;
+        options.domainMode = false;
+        options.domainSelections = struct('tag', {}, 'label', {});
+
+        if logical(chkChangeDefaultFov.Value)
+            [okDomainCfg, domainCfg] = ask_domain_extraction_config(mdl);
+            if ~okDomainCfg
+                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                appendLog('INFO', ts, '', 'Extracción cancelada por el usuario (selección de dominios).');
+                return;
+            end
+
+            options.domainMode = true;
+            options.domainSelections = domainCfg.selections;
+            options.enable3DPlot = logical(domainCfg.enable3DPlot);
+            options.enableHistogram = logical(domainCfg.enableHistogram);
+            options.enableCustomCoordinates = logical(domainCfg.enableCustomCoordinates);
+        end
+
+        if options.enable3DPlot && logical(chkProjectionScale.Value)
+            [okProjectionScale, projectionOrthoScale] = ask_projection_orthoscale();
+            if ~okProjectionScale
+                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                appendLog('INFO', ts, '', 'Extracción cancelada por el usuario (configuración de orthoscale).');
+                return;
+            end
+            options.projectionOrthoScale = projectionOrthoScale;
+        end
+
+        if ~options.enable3DPlot && ~options.enableHistogram && ~options.enableCustomCoordinates && ...
+           ~options.enableMagnets3DPlot && ~options.enableMagnetsHistogram
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('WARN', ts, '', ...
+                ['Debe seleccionar al menos una opción de salida ' ...
+                 '(B_FOV 3D, B_FOV Histogram, B_FOV Custom Coordinates, Magnets 3D o Magnets Histogram).']);
+            return;
+        end
+
+        if options.enableHistogram
+            [okBins, histBins] = ask_histogram_bins();
+            if ~okBins
+                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                appendLog('INFO', ts, '', 'Extracción cancelada por el usuario (configuración de histogram bins).');
+                return;
+            end
+            options.histBins = histBins;
+        else
+            options.histBins = getpref('ComsolAnalyzer', 'HistogramBins', 100);
+        end
+
+        if options.enableCustomCoordinates
+            [okCoord, coordCfg] = ask_custom_coordinates_config();
+            if ~okCoord
+                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                appendLog('INFO', ts, '', 'Extracción cancelada por el usuario (configuración de coordenadas).');
+                return;
+            end
+            options.coordConfig = coordCfg;
+        else
+            options.coordConfig = struct('model', 'Spherical coordinates', ...
+                'nTheta', getpref('ComsolAnalyzer', 'Coord_nTheta', 100), ...
+                'nPhi',   getpref('ComsolAnalyzer', 'Coord_nPhi', 100), ...
+                'R',      getpref('ComsolAnalyzer', 'Coord_R', 0.1));
+        end
+
+        if options.enableMagnetsHistogram
+            [okMagnetsCfg, magnetsCfg] = ask_magnets_histogram_config();
+            if ~okMagnetsCfg
+                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                appendLog('INFO', ts, '', 'Extracción cancelada por el usuario (configuración de Magnets histogram).');
+                return;
+            end
+            options.magnetsHistogram = magnetsCfg;
+            options.magnetsHistBins = magnetsCfg.bins;
+            options.magnetsStepPercent = magnetsCfg.stepPercent;
+            options.magnetsBr = magnetsCfg.br;
+            options.normH = magnetsCfg.normH;
+        else
+            options.magnetsHistogram = struct(...
+                'bins', getpref('ComsolAnalyzer', 'MagnetsHistogramBins', 100), ...
+                'stepPercent', getpref('ComsolAnalyzer', 'MagnetsHistogramStepPercent', 2), ...
+                'br', getpref('ComsolAnalyzer', 'MagnetsHistogramBr', 1.4), ...
+                'normMEnabled', true, ...
+                'normHEnabled', false, ...
+                'normH', struct(...
+                    'enabled', false, ...
+                    'Hcb', [], ...
+                    'Hcj', [], ...
+                    'Hknee', [], ...
+                    'Hlinear_end', [], ...
+                    'extraH', struct('name', {}, 'value', {})));
+            options.magnetsHistBins = getpref('ComsolAnalyzer', 'MagnetsHistogramBins', 100);
+            options.magnetsStepPercent = getpref('ComsolAnalyzer', 'MagnetsHistogramStepPercent', 2);
+            options.magnetsBr = getpref('ComsolAnalyzer', 'MagnetsHistogramBr', 1.4);
+            options.normH = options.magnetsHistogram.normH;
+        end
+
+        % Deshabilitar Run durante la extracción
+        btnRun.Enable = 'off';
+        extractionStartedAt = tic;
+        heartbeatTimer = startExtractionHeartbeat();
+        drawnow;
+
+        % Callbacks para extraction_controller
+        logFn      = @(level, ts, tag, msg) appendLog(level, ts, tag, msg);
+        progressFn = @(current, total) appendLog('INFO', ...
+            datestr(now, 'yyyy-mm-dd HH:MM:SS'), '', ...
+            sprintf('Progreso: %d / %d datasets procesados.', current, total));
+
+        % Ejecutar extracción
+        try
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            if options.domainMode
+                appendLog('INFO', ts, '', sprintf('Iniciando extracción de %d dataset(s) en %d selección(es) de dominio.', ...
+                    numel(selectedDatasets), numel(options.domainSelections)));
+            else
+                appendLog('INFO', ts, '', sprintf('Iniciando extracción de %d dataset(s).', numel(selectedDatasets)));
+            end
+
+            summary = extraction_controller_XYZ(mdl, selectedDatasets, outputDir, ...
+                                            modelName, logFn, progressFn, fovInfo, options);
+        catch err
+            stopExtractionHeartbeat(heartbeatTimer);
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('ERROR', ts, '', ...
+                sprintf('Error inesperado en extraction_controller: %s', err.message));
+            updateRunButtonState();
+            return;
+        end
+
+        stopExtractionHeartbeat(heartbeatTimer);
+
+        % Mostrar resumen final
+        ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+        appendLog('INFO', ts, '', '--- Resumen de extracción ---');
+        appendLog('INFO', ts, '', sprintf('  Datasets OK:    %d', summary.nOK));
+        appendLog('INFO', ts, '', sprintf('  Datasets error: %d', summary.nError));
+        appendLog('INFO', ts, '', sprintf('  Directorio:     %s', summary.outputDir));
+        appendLog('INFO', ts, '', sprintf('  Tiempo total:   %s', formatElapsedTime(toc(extractionStartedAt))));
+
+        % Rehabilitar Run
+        updateRunButtonState();
+    end
+
+    function runGeometryPlotsCallback()
+        if isFigureClosing()
+            return;
+        end
+
+        status = refreshConnectionStatus('status', false);
+        if ~status.connected
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('WARN', ts, '', ...
+                'LiveLink no esta conectado. Verifica COMSOL with MATLAB y vuelve a intentar.');
+            updateRunButtonState();
+            return;
+        end
+
+        outputDir = strtrim(outputField.Value);
+        if isempty(outputDir)
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('WARN', ts, '', ...
+                'Debe especificar un directorio de salida.');
+            return;
+        end
+
+        if isfolder(outputDir)
+            setpref(prefGroup, 'LastOutputDir', outputDir);
+            lastOutputDir = outputDir;
+        end
+
+        s = fig.UserData;
+        mdl = s.model;
+
+        if isempty(mdl)
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('WARN', ts, '', 'No hay modelo cargado.');
+            return;
+        end
+
+        mphPath = strtrim(mphField.Value);
+        [~, modelName, ~] = fileparts(mphPath);
+
+        [canWriteOutput, outputMessage] = validate_output_directory(outputDir, modelName);
+        if ~canWriteOutput
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('ERROR', ts, '', outputMessage);
+            appendLog('WARN', ts, '', ...
+                'Selecciona una carpeta local con permisos de escritura y vuelve a ejecutar.');
+            return;
+        end
+
+        [okGeomCfg, geomCfg] = ask_geometry_hide_config(mdl);
+        if ~okGeomCfg
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('INFO', ts, '', 'Extracción de geometría cancelada por el usuario.');
+            return;
+        end
+
+        startedAt = tic;
+        heartbeatTimer = startExtractionHeartbeat();
+        drawnow;
+
+        try
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('INFO', ts, '', 'Iniciando export de Geometry plots.');
+            appendLog('INFO', ts, '', 'Progreso: 1 / 1 tareas procesadas.');
+
+            simulationRoot = fullfile(outputDir, 'Simulation_results');
+            export_geometry_plots(mdl, simulationRoot, geomCfg.hideSelections);
+
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('INFO', ts, '', '--- Resumen Geometry plots ---');
+            appendLog('INFO', ts, '', sprintf('  Directorio:     %s', simulationRoot));
+            appendLog('INFO', ts, '', sprintf('  Tiempo total:   %s', formatElapsedTime(toc(startedAt))));
+        catch err
+            if is_not_connected_runtime_error(err)
+                ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                appendLog('WARN', ts, '', ...
+                    'LiveLink se desconecto durante Geometry plots. Intentando reconexion y recarga de modelo...');
+
+                recovery = recoverLiveLinkAndReloadModel();
+                if recovery.connected
+                    try
+                        mdl = recovery.model;
+                        simulationRoot = fullfile(outputDir, 'Simulation_results');
+                        export_geometry_plots(mdl, simulationRoot, geomCfg.hideSelections);
+
+                        ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                        appendLog('INFO', ts, '', ...
+                            'Geometry plots completados tras reconexion LiveLink y recarga del modelo.');
+                        appendLog('INFO', ts, '', '--- Resumen Geometry plots ---');
+                        appendLog('INFO', ts, '', sprintf('  Directorio:     %s', simulationRoot));
+                        appendLog('INFO', ts, '', sprintf('  Tiempo total:   %s', formatElapsedTime(toc(startedAt))));
+                        stopExtractionHeartbeat(heartbeatTimer);
+                        return;
+                    catch retryErr
+                        stopExtractionHeartbeat(heartbeatTimer);
+                        ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                        appendLog('ERROR', ts, '', ...
+                            sprintf('Fallo Geometry plots tras reconexion: %s', retryErr.message));
+                        return;
+                    end
+                else
+                    ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+                    appendLog('ERROR', ts, '', ...
+                        ['No se pudo recuperar LiveLink para Geometry plots. ' recovery.detail]);
+                    stopExtractionHeartbeat(heartbeatTimer);
+                    return;
+                end
+            end
+
+            stopExtractionHeartbeat(heartbeatTimer);
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('ERROR', ts, '', ...
+                sprintf('Error inesperado en export_geometry_plots: %s', err.message));
+            return;
+        end
+
+        stopExtractionHeartbeat(heartbeatTimer);
+    end
+
+    function recovery = recoverLiveLinkAndReloadModel()
+        recovery = struct('connected', false, 'model', [], 'detail', '');
+
+        status = refreshConnectionStatus('connect', true);
+        if ~status.connected
+            recovery.detail = status.detail;
+            if isempty(strtrim(recovery.detail))
+                recovery.detail = status.message;
+            end
+            return;
+        end
+
+        mphPath = strtrim(mphField.Value);
+        if isempty(mphPath) || ~isfile(mphPath)
+            recovery.detail = 'No hay una ruta .mph valida para recargar el modelo.';
+            return;
+        end
+
+        try
+            mdl = load_model(mphPath);
+        catch err
+            recovery.detail = ['Conexion recuperada, pero fallo recarga de modelo: ' err.message];
+            return;
+        end
+
+        s = fig.UserData;
+        s.model = mdl;
+        fig.UserData = s;
+
+        recovery.connected = true;
+        recovery.model = mdl;
+        recovery.detail = '';
+    end
+
+    function tf = is_not_connected_runtime_error(err)
+        tf = false;
+        if isempty(err)
+            return;
+        end
+
+        msg = lower(err.message);
+        tf = contains(msg, 'not connected to a server') || ...
+             contains(msg, 'no conectado a un servidor') || ...
+             contains(msg, 'connection reset') || ...
+             contains(msg, 'connection timed out') || ...
+             contains(msg, 'connection refused') || ...
+             contains(msg, 'broken pipe') || ...
+             contains(msg, 'java.rmi');
+
+        if tf
+            return;
+        end
+
+        for idx = 1:numel(err.cause)
+            try
+                cmsg = lower(err.cause{idx}.message);
+                if contains(cmsg, 'not connected to a server') || ...
+                   contains(cmsg, 'no conectado a un servidor') || ...
+                   contains(cmsg, 'connection reset') || ...
+                   contains(cmsg, 'connection timed out') || ...
+                   contains(cmsg, 'connection refused') || ...
+                   contains(cmsg, 'broken pipe') || ...
+                   contains(cmsg, 'java.rmi')
+                    tf = true;
+                    return;
+                end
+            catch
+            end
+        end
+    end
+
+    function heartbeatTimer = startExtractionHeartbeat()
+        heartbeatTimer = [];
+        if isFigureClosing()
+            return;
+        end
+
+        stopExtractionHeartbeat([]);
+
+        startedAt = tic;
+        heartbeatTimer = timer( ...
+            'ExecutionMode', 'fixedSpacing', ...
+            'Period', 60, ...
+            'BusyMode', 'drop', ...
+            'TimerFcn', @onHeartbeatTick, ...
+            'StopFcn', @onHeartbeatStop, ...
+            'ErrorFcn', @onHeartbeatError);
+
+        s = fig.UserData;
+        s.heartbeatTimer = heartbeatTimer;
+        fig.UserData = s;
+
+        start(heartbeatTimer);
+
+        function onHeartbeatTick(~, ~)
+            if isFigureClosing() || ~isvalid(logArea)
+                return;
+            end
+
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('INFO', ts, '', ...
+                ['Extracción en curso. La aplicación sigue activa ' ...
+                 '(tiempo transcurrido: ' formatElapsedTime(toc(startedAt)) ').']);
+        end
+
+        function onHeartbeatStop(src, ~)
+            clearHeartbeatReference(src);
+        end
+
+        function onHeartbeatError(src, evt)
+            clearHeartbeatReference(src);
+            if isFigureClosing() || ~isvalid(logArea)
+                return;
+            end
+
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('WARN', ts, '', ['Heartbeat de extracción detenido: ' evt.Data.Message]);
+        end
+    end
+
+    function stopExtractionHeartbeat(heartbeatTimer)
+        timerToStop = heartbeatTimer;
+        if isempty(timerToStop) && isvalid(fig)
+            s = fig.UserData;
+            if isfield(s, 'heartbeatTimer')
+                timerToStop = s.heartbeatTimer;
+            end
+        end
+
+        if isempty(timerToStop)
+            clearHeartbeatReference([]);
+            return;
+        end
+
+        try
+            if isvalid(timerToStop)
+                stop(timerToStop);
+            end
+        catch
+        end
+
+        try
+            if isvalid(timerToStop)
+                delete(timerToStop);
+            end
+        catch
+        end
+
+        clearHeartbeatReference(timerToStop);
+    end
+
+    function clearHeartbeatReference(timerHandle)
+        if ~isvalid(fig)
+            return;
+        end
+
+        s = fig.UserData;
+        if ~isfield(s, 'heartbeatTimer') || isempty(s.heartbeatTimer)
+            return;
+        end
+
+        if isempty(timerHandle)
+            s.heartbeatTimer = [];
+            fig.UserData = s;
+            return;
+        end
+
+        try
+            sameTimer = isvalid(timerHandle) && isvalid(s.heartbeatTimer) && timerHandle == s.heartbeatTimer;
+        catch
+            sameTimer = false;
+        end
+
+        if sameTimer
+            s.heartbeatTimer = [];
+            fig.UserData = s;
+        end
+    end
+
+    function text = formatElapsedTime(secondsElapsed)
+        totalSeconds = max(0, floor(secondsElapsed));
+        hoursPart = floor(totalSeconds / 3600);
+        minutesPart = floor(mod(totalSeconds, 3600) / 60);
+        secondsPart = mod(totalSeconds, 60);
+
+        if hoursPart > 0
+            text = sprintf('%02dh %02dm %02ds', hoursPart, minutesPart, secondsPart);
+        else
+            text = sprintf('%02dm %02ds', minutesPart, secondsPart);
+        end
+    end
+
+    function copyLogCallback()
+        if isFigureClosing()
+            return;
+        end
+
+        lines = logArea.Value;
+
+        if ischar(lines)
+            lines = {lines};
+        elseif isstring(lines)
+            lines = cellstr(lines);
+        end
+
+        if isempty(lines)
+            payload = '';
+        else
+            payload = strjoin(lines, newline);
+        end
+
+        try
+            clipboard('copy', payload);
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('INFO', ts, '', 'Log copiado al portapapeles.');
+        catch err
+            ts = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+            appendLog('ERROR', ts, '', ['No se pudo copiar el log: ' err.message]);
+        end
+    end
+
+    function [ok, bins] = ask_histogram_bins()
+        ok = false;
+        bins = getpref('ComsolAnalyzer', 'HistogramBins', 100);
+
+        answer = inputdlg({'Number of bins:'}, 'B_FOV Histogram', 1, {num2str(bins)});
+        if isempty(answer)
+            return;
+        end
+
+        value = str2double(strtrim(answer{1}));
+        if isnan(value) || ~isfinite(value) || value < 1 || floor(value) ~= value
+            uialert(fig, 'El valor de bins debe ser un entero positivo.', 'Valor inválido');
+            return;
+        end
+
+        bins = value;
+        setpref('ComsolAnalyzer', 'HistogramBins', bins);
+        ok = true;
+    end
+
+    function [ok, cfg] = ask_domain_extraction_config(model)
+        ok = false;
+        cfg = struct('selections', struct('tag', {}, 'label', {}), ...
+            'enable3DPlot', false, ...
+            'enableHistogram', false, ...
+            'enableCustomCoordinates', false);
+
+        selections = get_component1_selections(model);
+        if isempty(selections)
+            uialert(fig, ['No se encontraron selecciones en Component 1 > Definitions > Selections. ' ...
+                'No es posible ejecutar Change default FOV.'], 'Selections no encontradas');
+            return;
+        end
+
+        dlg = uifigure('Name', 'Change default FOV', ...
+            'Position', [300 170 520 470], ...
+            'WindowStyle', 'modal', ...
+            'Resize', 'off');
+        dlg.Tag = 'ComsolAnalyzerChildDialog';
+        registerChildDialog(dlg);
+
+        uilabel(dlg, 'Text', 'Selections (Component 1 > Definitions > Selections):', ...
+            'Position', [20 430 470 22], 'FontWeight', 'bold');
+
+        items = cell(numel(selections), 1);
+        itemData = cell(numel(selections), 1);
+        for idx = 1:numel(selections)
+            items{idx} = selections(idx).label;
+            itemData{idx} = selections(idx).tag;
+        end
+
+        selectionList = uilistbox(dlg, ...
+            'Position', [20 170 480 255], ...
+            'Items', items, ...
+            'ItemsData', itemData, ...
+            'MultiSelect', 'on', ...
+            'Value', {});
+
+        chkDomain3D = uicheckbox(dlg, ...
+            'Text', 'B_Domain 3D Plot', ...
+            'Position', [20 132 200 22], ...
+            'Value', true);
+        chkDomainHist = uicheckbox(dlg, ...
+            'Text', 'B_Domain Histogram', ...
+            'Position', [20 108 200 22], ...
+            'Value', true);
+        chkDomainCoord = uicheckbox(dlg, ...
+            'Text', 'B_Domain Custom Coordinates', ...
+            'Position', [20 84 250 22], ...
+            'Value', false);
+
+        btnRunDomain = uibutton(dlg, 'push', ...
+            'Text', 'Run', ...
+            'Position', [340 20 75 34], ...
+            'FontWeight', 'bold');
+        btnCancelDomain = uibutton(dlg, 'push', ...
+            'Text', 'Cancel', ...
+            'Position', [425 20 75 34]);
+
+        btnRunDomain.ButtonPushedFcn = @on_run;
+        btnCancelDomain.ButtonPushedFcn = @on_cancel;
+        dlg.CloseRequestFcn = @on_cancel;
+
+        uiwait(dlg);
+
+        function on_run(~, ~)
+            selectedTags = selectionList.Value;
+            if ischar(selectedTags)
+                selectedTags = {selectedTags};
+            end
+
+            if isempty(selectedTags)
+                uialert(dlg, 'Selecciona al menos una selection.', 'Selección requerida');
+                return;
+            end
+
+            if ~logical(chkDomain3D.Value) && ~logical(chkDomainHist.Value) && ~logical(chkDomainCoord.Value)
+                uialert(dlg, 'Selecciona al menos una salida de dominio.', 'Salida requerida');
+                return;
+            end
+
+            selectedStruct = struct('tag', {}, 'label', {});
+            for iSel = 1:numel(selectedTags)
+                selTag = selectedTags{iSel};
+                for jSel = 1:numel(selections)
+                    if strcmp(selections(jSel).tag, selTag)
+                        selectedStruct(end+1).tag = selections(jSel).tag; %#ok<AGROW>
+                        selectedStruct(end).label = selections(jSel).label;
+                        break;
+                    end
+                end
+            end
+
+            if isempty(selectedStruct)
+                uialert(dlg, 'No se pudieron resolver las selections elegidas.', 'Selección inválida');
+                return;
+            end
+
+            cfg.selections = selectedStruct;
+            cfg.enable3DPlot = logical(chkDomain3D.Value);
+            cfg.enableHistogram = logical(chkDomainHist.Value);
+            cfg.enableCustomCoordinates = logical(chkDomainCoord.Value);
+            ok = true;
+
+            if isvalid(dlg)
+                uiresume(dlg);
+                unregisterChildDialog(dlg);
+                delete(dlg);
+            end
+        end
+
+        function on_cancel(~, ~)
+            ok = false;
+            if isvalid(dlg)
+                uiresume(dlg);
+                unregisterChildDialog(dlg);
+                delete(dlg);
+            end
+        end
+    end
+
+    function [ok, cfg] = ask_geometry_hide_config(model)
+        ok = false;
+        cfg = struct('hideSelections', struct('tag', {}, 'label', {}));
+
+        selections = get_component1_selections(model);
+        if isempty(selections)
+            uialert(fig, ['No se encontraron selecciones en Component 1 > Definitions > Selections. ' ...
+                'No es posible ejecutar Extract Geometry Plots.'], 'Selections no encontradas');
+            return;
+        end
+
+        dlg = uifigure('Name', 'Extract Geometry Plots', ...
+            'Position', [320 190 500 420], ...
+            'WindowStyle', 'modal', ...
+            'Resize', 'off');
+        dlg.Tag = 'ComsolAnalyzerChildDialog';
+        registerChildDialog(dlg);
+
+        uilabel(dlg, 'Text', 'Domains to hide (Definitions > Selections):', ...
+            'Position', [20 380 450 22], 'FontWeight', 'bold');
+
+        items = cell(numel(selections), 1);
+        itemData = cell(numel(selections), 1);
+        for idx = 1:numel(selections)
+            items{idx} = selections(idx).label;
+            itemData{idx} = selections(idx).tag;
+        end
+
+        selectionList = uilistbox(dlg, ...
+            'Position', [20 80 460 290], ...
+            'Items', items, ...
+            'ItemsData', itemData, ...
+            'MultiSelect', 'on', ...
+            'Value', {});
+
+        btnRunGeom = uibutton(dlg, 'push', ...
+            'Text', 'Run', ...
+            'Position', [320 20 75 34], ...
+            'FontWeight', 'bold');
+        btnCancelGeom = uibutton(dlg, 'push', ...
+            'Text', 'Cancel', ...
+            'Position', [405 20 75 34]);
+
+        btnRunGeom.ButtonPushedFcn = @on_run;
+        btnCancelGeom.ButtonPushedFcn = @on_cancel;
+        dlg.CloseRequestFcn = @on_cancel;
+
+        uiwait(dlg);
+
+        function on_run(~, ~)
+            selectedTags = selectionList.Value;
+            if ischar(selectedTags)
+                selectedTags = {selectedTags};
+            end
+
+            selectedStruct = struct('tag', {}, 'label', {});
+            for iSel = 1:numel(selectedTags)
+                selTag = selectedTags{iSel};
+                for jSel = 1:numel(selections)
+                    if strcmp(selections(jSel).tag, selTag)
+                        selectedStruct(end+1).tag = selections(jSel).tag; %#ok<AGROW>
+                        selectedStruct(end).label = selections(jSel).label;
+                        break;
+                    end
+                end
+            end
+
+            cfg.hideSelections = selectedStruct;
+            ok = true;
+            if isvalid(dlg)
+                uiresume(dlg);
+                unregisterChildDialog(dlg);
+                delete(dlg);
+            end
+        end
+
+        function on_cancel(~, ~)
+            ok = false;
+            if isvalid(dlg)
+                uiresume(dlg);
+                unregisterChildDialog(dlg);
+                delete(dlg);
+            end
+        end
+    end
+
+    function selections = get_component1_selections(model)
+        selections = struct('tag', {}, 'label', {});
+
+        try
+            tags = model.component('comp1').selection.tags();
+        catch
+            tags = [];
+        end
+
+        for idx = 1:numel(tags)
+            selTag = char(tags(idx));
+            selLabel = '';
+            try
+                selLabel = strtrim(char(model.component('comp1').selection(selTag).label()));
+            catch
+            end
+
+            if isempty(selLabel)
+                selLabel = selTag;
+            end
+
+            selections(end+1).tag = selTag; %#ok<AGROW>
+            selections(end).label = selLabel;
+        end
+    end
+
+    function [ok, cfg] = ask_custom_coordinates_config()
+        ok = false;
+        cfg = struct('model', 'Spherical coordinates', ...
+            'source', 'spherical', ...
+            'nTheta', getpref('ComsolAnalyzer', 'Coord_nTheta', 100), ...
+            'nPhi',   getpref('ComsolAnalyzer', 'Coord_nPhi', 100), ...
+            'R',      getpref('ComsolAnalyzer', 'Coord_R', 0.1), ...
+            'coordFilePath', '', ...
+            'coordColumns', [1 2 3], ...
+            'sourceFilePath', '');
+
+        dlg = uifigure('Name', 'B_FOV Custom Coordinates', ...
+            'Position', [280 180 480 350], ...
+            'WindowStyle', 'modal', ...
+            'Resize', 'off');
+        dlg.Tag = 'ComsolAnalyzerChildDialog';
+        registerChildDialog(dlg);
+
+        uilabel(dlg, 'Text', 'Model selection', 'Position', [20 298 130 22], 'FontWeight', 'bold');
+        modelDrop = uidropdown(dlg, ...
+            'Items', {'Spherical coordinates', 'From file'}, ...
+            'Value', 'Spherical coordinates', ...
+            'Position', [160 298 260 22]);
+
+        uilabel(dlg, 'Text', 'n_theta', 'Position', [20 246 80 22], 'FontWeight', 'bold');
+        nThetaField = uieditfield(dlg, 'numeric', ...
+            'Position', [160 246 260 22], ...
+            'RoundFractionalValues', 'on', ...
+            'Limits', [1 Inf], ...
+            'LowerLimitInclusive', true, ...
+            'Value', cfg.nTheta);
+
+        uilabel(dlg, 'Text', 'n_phi', 'Position', [20 210 80 22], 'FontWeight', 'bold');
+        nPhiField = uieditfield(dlg, 'numeric', ...
+            'Position', [160 210 260 22], ...
+            'RoundFractionalValues', 'on', ...
+            'Limits', [1 Inf], ...
+            'LowerLimitInclusive', true, ...
+            'Value', cfg.nPhi);
+
+        uilabel(dlg, 'Text', 'R [m]', 'Position', [20 174 80 22], 'FontWeight', 'bold');
+        rField = uieditfield(dlg, 'numeric', ...
+            'Position', [160 174 260 22], ...
+            'Limits', [eps Inf], ...
+            'LowerLimitInclusive', true, ...
+            'Value', cfg.R);
+
+        uilabel(dlg, 'Text', 'Coordinate file', 'Position', [20 128 130 22], 'FontWeight', 'bold');
+        filePathField = uieditfield(dlg, 'text', ...
+            'Position', [160 128 180 22], ...
+            'Placeholder', 'Select a .txt file...');
+        btnBrowseFile = uibutton(dlg, 'push', ...
+            'Text', 'Browse', ...
+            'Position', [350 128 70 22], ...
+            'ButtonPushedFcn', @browseCoordinateFile);
+
+        uilabel(dlg, 'Text', 'Columns x / y / z', 'Position', [20 92 130 22], 'FontWeight', 'bold');
+        xColField = uieditfield(dlg, 'numeric', ...
+            'Position', [160 92 54 22], ...
+            'RoundFractionalValues', 'on', ...
+            'Limits', [1 Inf], ...
+            'LowerLimitInclusive', true, ...
+            'Value', 1);
+        yColField = uieditfield(dlg, 'numeric', ...
+            'Position', [220 92 54 22], ...
+            'RoundFractionalValues', 'on', ...
+            'Limits', [1 Inf], ...
+            'LowerLimitInclusive', true, ...
+            'Value', 2);
+        zColField = uieditfield(dlg, 'numeric', ...
+            'Position', [280 92 54 22], ...
+            'RoundFractionalValues', 'on', ...
+            'Limits', [1 Inf], ...
+            'LowerLimitInclusive', true, ...
+            'Value', 3);
+        fileInfoLabel = uilabel(dlg, 'Text', '', ...
+            'Position', [20 56 420 20], ...
+            'FontColor', [0.35 0.35 0.35]);
+
+        btnOk = uibutton(dlg, 'push', ...
+            'Text', 'OK', ...
+            'Position', [160 16 80 30]);
+        btnCancel = uibutton(dlg, 'push', ...
+            'Text', 'Cancel', ...
+            'Position', [260 16 80 30]);
+
+        btnOk.ButtonPushedFcn = @on_ok;
+        btnCancel.ButtonPushedFcn = @on_cancel;
+        modelDrop.ValueChangedFcn = @(~,~) updateDialogMode();
+        dlg.CloseRequestFcn = @on_cancel;
+
+        updateDialogMode();
+
+        uiwait(dlg);
+
+        function updateDialogMode()
+            isFileMode = strcmp(modelDrop.Value, 'From file');
+
+            if isFileMode
+                nThetaField.Enable = 'off';
+                nPhiField.Enable = 'off';
+                rField.Enable = 'off';
+                filePathField.Enable = 'on';
+                btnBrowseFile.Enable = 'on';
+                xColField.Enable = 'on';
+                yColField.Enable = 'on';
+                zColField.Enable = 'on';
+            else
+                nThetaField.Enable = 'on';
+                nPhiField.Enable = 'on';
+                rField.Enable = 'on';
+                filePathField.Enable = 'off';
+                btnBrowseFile.Enable = 'off';
+                xColField.Enable = 'off';
+                yColField.Enable = 'off';
+                zColField.Enable = 'off';
+            end
+
+            if isFileMode
+                if isempty(strtrim(filePathField.Value))
+                    fileInfoLabel.Text = 'Select a .txt file with at least 3 numeric columns.';
+                end
+            else
+                fileInfoLabel.Text = '';
+            end
+        end
+
+        function browseCoordinateFile(~, ~)
+            startDir = '';
+            currentPath = strtrim(filePathField.Value);
+            if ~isempty(currentPath)
+                currentDir = fileparts(currentPath);
+                if ~isempty(currentDir) && isfolder(currentDir)
+                    startDir = currentDir;
+                end
+            end
+
+            [fname, fpath] = uigetfile({'*.txt', 'Text files (*.txt)'}, ...
+                'Select coordinate file', startDir);
+            if isequal(fname, 0)
+                return;
+            end
+
+            fullPath = fullfile(fpath, fname);
+            filePathField.Value = fullPath;
+
+            try
+                data = readmatrix(fullPath, 'FileType', 'text', 'CommentStyle', '%');
+            catch err
+                fileInfoLabel.Text = '';
+                uialert(dlg, ['No se pudo leer el archivo de coordenadas: ' err.message], 'Archivo inválido');
+                return;
+            end
+
+            if isempty(data) || size(data, 2) < 3
+                fileInfoLabel.Text = '';
+                uialert(dlg, 'El archivo .txt debe contener al menos 3 columnas.', 'Archivo inválido');
+                return;
+            end
+
+            if size(data, 2) > 3
+                msg = sprintf('El archivo tiene %d columnas. Se usaran las columnas seleccionadas.', size(data, 2));
+                fileInfoLabel.Text = msg;
+                uialert(dlg, msg, 'Archivo con columnas extra');
+            else
+                fileInfoLabel.Text = sprintf('Archivo cargado con %d columna(s).', size(data, 2));
+            end
+
+            xColField.Value = 1;
+            yColField.Value = 2;
+            zColField.Value = 3;
+        end
+
+        function on_ok(~, ~)
+            candidateCfg = struct('model', modelDrop.Value, ...
+                'source', 'spherical', ...
+                'nTheta', floor(nThetaField.Value), ...
+                'nPhi', floor(nPhiField.Value), ...
+                'R', rField.Value, ...
+                'coordFilePath', '', ...
+                'coordColumns', [1 2 3], ...
+                'sourceFilePath', '');
+
+            if strcmp(modelDrop.Value, 'From file')
+                sourceFilePath = strtrim(filePathField.Value);
+                coordColumns = [floor(xColField.Value), floor(yColField.Value), floor(zColField.Value)];
+
+                if isempty(sourceFilePath) || ~isfile(sourceFilePath)
+                    uialert(dlg, 'Selecciona un archivo .txt de coordenadas válido.', 'Archivo inválido');
+                    return;
+                end
+
+                if any(coordColumns < 1) || numel(unique(coordColumns)) ~= 3
+                    uialert(dlg, 'Las columnas de coordenadas deben ser enteros positivos y distintos.', 'Columnas inválidas');
+                    return;
+                end
+
+                try
+                    data = readmatrix(sourceFilePath, 'FileType', 'text', 'CommentStyle', '%');
+                catch err
+                    uialert(dlg, ['No se pudo leer el archivo de coordenadas: ' err.message], 'Archivo inválido');
+                    return;
+                end
+
+                if isempty(data) || size(data, 2) < 3
+                    uialert(dlg, 'El archivo .txt debe contener al menos 3 columnas.', 'Archivo inválido');
+                    return;
+                end
+
+                if size(data, 2) < max(coordColumns)
+                    uialert(dlg, sprintf('El archivo solo contiene %d columnas y se solicitaron las columnas %s.', ...
+                        size(data, 2), mat2str(coordColumns)), 'Columnas inválidas');
+                    return;
+                end
+
+                if size(data, 2) > 3
+                    msg = sprintf('El archivo tiene %d columnas. Se usaran las columnas %d, %d y %d.', ...
+                        size(data, 2), coordColumns(1), coordColumns(2), coordColumns(3));
+                    fileInfoLabel.Text = msg;
+                    uialert(dlg, msg, 'Archivo con columnas extra');
+                end
+
+                coords = data(:, coordColumns);
+                coords = coords(all(isfinite(coords), 2), :);
+
+                if isempty(coords)
+                    uialert(dlg, 'No se encontraron coordenadas validas en las columnas seleccionadas.', 'Archivo inválido');
+                    return;
+                end
+
+                candidateCfg.source = 'file';
+                candidateCfg.coordFilePath = sourceFilePath;
+                candidateCfg.coordColumns = coordColumns;
+                candidateCfg.sourceFilePath = sourceFilePath;
+
+                previewText = sprintf('Preview de coordenadas desde archivo: %s | columnas %d, %d, %d | puntos=%d', ...
+                    sourceFilePath, coordColumns(1), coordColumns(2), coordColumns(3), size(coords, 1));
+                shouldProceed = preview_custom_coordinate_configuration(candidateCfg, coords, previewText);
+                if ~shouldProceed
+                    return;
+                end
+
+                cfg = candidateCfg;
+                ok = true;
+                uiresume(dlg);
+                unregisterChildDialog(dlg);
+                delete(dlg);
+                return;
+            end
+
+            nTheta = candidateCfg.nTheta;
+            nPhi = candidateCfg.nPhi;
+            rVal = candidateCfg.R;
+
+            if any([isnan(nTheta), isnan(nPhi), isnan(rVal)]) || ...
+               ~isfinite(nTheta) || ~isfinite(nPhi) || ~isfinite(rVal) || ...
+               nTheta < 1 || nPhi < 1 || rVal <= 0
+                uialert(dlg, 'Completa valores válidos para n_theta, n_phi y R.', 'Valores inválidos');
+                return;
+            end
+
+            coords = build_spherical_coordinate_matrix(candidateCfg.nTheta, candidateCfg.nPhi, candidateCfg.R);
+            previewText = sprintf('Preview del archivo Coordinates generado. nTheta=%d, nPhi=%d, R=%.6f m, puntos=%d', ...
+                candidateCfg.nTheta, candidateCfg.nPhi, candidateCfg.R, size(coords, 1));
+
+            shouldProceed = preview_custom_coordinate_configuration(candidateCfg, coords, previewText);
+            if ~shouldProceed
+                return;
+            end
+
+            cfg = candidateCfg;
+
+            setpref('ComsolAnalyzer', 'Coord_nTheta', cfg.nTheta);
+            setpref('ComsolAnalyzer', 'Coord_nPhi', cfg.nPhi);
+            setpref('ComsolAnalyzer', 'Coord_R', cfg.R);
+
+            ok = true;
+            uiresume(dlg);
+            unregisterChildDialog(dlg);
+            delete(dlg);
+        end
+
+        function on_cancel(~, ~)
+            ok = false;
+            if isvalid(dlg)
+                uiresume(dlg);
+                unregisterChildDialog(dlg);
+                delete(dlg);
+            end
+        end
+    end
+
+    function [ok, cfg] = ask_magnets_histogram_config()
+        ok = false;
+
+        defaultBins = getpref('ComsolAnalyzer', 'MagnetsHistogramBins', 100);
+        defaultStepPercent = getpref('ComsolAnalyzer', 'MagnetsHistogramStepPercent', 2);
+        defaultBr = getpref('ComsolAnalyzer', 'MagnetsHistogramBr', 1.4);
+
+        cfg = struct(...
+            'bins', defaultBins, ...
+            'stepPercent', defaultStepPercent, ...
+            'br', defaultBr, ...
+            'normMEnabled', true, ...
+            'normHEnabled', false, ...
+            'normH', struct(...
+                'enabled', false, ...
+                'Hcb', [], ...
+                'Hcj', [], ...
+                'Hknee', [], ...
+                'Hlinear_end', [], ...
+                'extraH', struct('name', {}, 'value', {})));
+
+        dlg = uifigure('Name', 'Magnets Histogram', ...
+            'Position', [280 140 560 560], ...
+            'WindowStyle', 'modal', ...
+            'Resize', 'off');
+        dlg.Tag = 'ComsolAnalyzerChildDialog';
+        registerChildDialog(dlg);
+
+        uilabel(dlg, 'Text', 'Magnets Histogram outputs:', ...
+            'Position', [20 522 220 22], 'FontWeight', 'bold');
+
+        chkNormM = uicheckbox(dlg, ...
+            'Text', 'normM', ...
+            'Position', [30 496 120 22], ...
+            'Value', true);
+
+        chkNormH = uicheckbox(dlg, ...
+            'Text', 'normH', ...
+            'Position', [160 496 120 22], ...
+            'Value', false);
+
+        uilabel(dlg, 'Text', 'Histogram bins (shared):', ...
+            'Position', [20 458 180 22], 'FontWeight', 'bold');
+        binsField = uieditfield(dlg, 'numeric', ...
+            'Position', [210 458 120 22], ...
+            'RoundFractionalValues', 'on', ...
+            'Limits', [1 Inf], ...
+            'LowerLimitInclusive', true, ...
+            'Value', defaultBins);
+
+        uilabel(dlg, 'Text', 'normM postprocess:', ...
+            'Position', [20 422 180 22], 'FontWeight', 'bold');
+        uilabel(dlg, 'Text', 'Step percent (%)', ...
+            'Position', [30 396 140 22]);
+        stepField = uieditfield(dlg, 'numeric', ...
+            'Position', [180 396 120 22], ...
+            'Limits', [eps Inf], ...
+            'LowerLimitInclusive', true, ...
+            'Value', defaultStepPercent);
+
+        uilabel(dlg, 'Text', 'Br (Tesla)', ...
+            'Position', [320 396 100 22]);
+        brField = uieditfield(dlg, 'numeric', ...
+            'Position', [420 396 120 22], ...
+            'Limits', [eps Inf], ...
+            'LowerLimitInclusive', true, ...
+            'Value', defaultBr);
+
+        uilabel(dlg, 'Text', 'normH thresholds (kA/m):', ...
+            'Position', [20 356 220 22], 'FontWeight', 'bold');
+
+        uilabel(dlg, 'Text', 'Hcb', 'Position', [30 332 120 22]);
+        hcbField = uieditfield(dlg, 'numeric', ...
+            'Position', [180 332 120 22], ...
+            'Value', 0);
+
+        uilabel(dlg, 'Text', 'Hcj', 'Position', [320 332 120 22]);
+        hcjField = uieditfield(dlg, 'numeric', ...
+            'Position', [420 332 120 22], ...
+            'Value', 0);
+
+        uilabel(dlg, 'Text', 'Hknee', 'Position', [30 302 120 22]);
+        hkneeField = uieditfield(dlg, 'numeric', ...
+            'Position', [180 302 120 22], ...
+            'Value', 0);
+
+        uilabel(dlg, 'Text', 'Hlinear_end', 'Position', [320 302 120 22]);
+        hlinearEndField = uieditfield(dlg, 'numeric', ...
+            'Position', [420 302 120 22], ...
+            'Value', 0);
+
+        uilabel(dlg, 'Text', 'Additional H values', ...
+            'Position', [20 266 220 22], 'FontWeight', 'bold');
+
+        extraTable = uitable(dlg, ...
+            'Position', [20 94 520 170], ...
+            'ColumnName', {'Name', 'Value (kA/m)'}, ...
+            'ColumnEditable', [true true], ...
+            'ColumnFormat', {'char', 'numeric'}, ...
+            'Data', cell(0, 2));
+
+        btnAddExtra = uibutton(dlg, 'push', ...
+            'Text', 'Add', ...
+            'Position', [20 64 80 24], ...
+            'ButtonPushedFcn', @on_add_extra);
+
+        btnRemoveExtra = uibutton(dlg, 'push', ...
+            'Text', 'Remove Last', ...
+            'Position', [110 64 100 24], ...
+            'ButtonPushedFcn', @on_remove_extra);
+
+        btnOk = uibutton(dlg, 'push', ...
+            'Text', 'OK', ...
+            'Position', [370 20 80 30], ...
+            'FontWeight', 'bold', ...
+            'ButtonPushedFcn', @on_ok);
+
+        btnCancel = uibutton(dlg, 'push', ...
+            'Text', 'Cancel', ...
+            'Position', [460 20 80 30], ...
+            'ButtonPushedFcn', @on_cancel);
+
+        chkNormM.ValueChangedFcn = @(~,~) update_mode_controls();
+        chkNormH.ValueChangedFcn = @(~,~) update_mode_controls();
+        dlg.CloseRequestFcn = @on_cancel;
+
+        update_mode_controls();
+        uiwait(dlg);
+
+        function update_mode_controls()
+            normMEnabled = logical(chkNormM.Value);
+            normHEnabled = logical(chkNormH.Value);
+
+            if normMEnabled
+                stepField.Enable = 'on';
+                brField.Enable = 'on';
+            else
+                stepField.Enable = 'off';
+                brField.Enable = 'off';
+            end
+
+            if normHEnabled
+                hcbField.Enable = 'on';
+                hcjField.Enable = 'on';
+                hkneeField.Enable = 'on';
+                hlinearEndField.Enable = 'on';
+                extraTable.Enable = 'on';
+                btnAddExtra.Enable = 'on';
+                btnRemoveExtra.Enable = 'on';
+            else
+                hcbField.Enable = 'off';
+                hcjField.Enable = 'off';
+                hkneeField.Enable = 'off';
+                hlinearEndField.Enable = 'off';
+                extraTable.Enable = 'off';
+                btnAddExtra.Enable = 'off';
+                btnRemoveExtra.Enable = 'off';
+            end
+        end
+
+        function on_add_extra(~, ~)
+            data = extraTable.Data;
+            if isempty(data)
+                data = cell(1, 2);
+                data(1, :) = {'', NaN};
+            else
+                data(end+1, :) = {'', NaN}; %#ok<AGROW>
+            end
+            extraTable.Data = data;
+        end
+
+        function on_remove_extra(~, ~)
+            data = extraTable.Data;
+            if isempty(data)
+                return;
+            end
+            data(end, :) = [];
+            extraTable.Data = data;
+        end
+
+        function on_ok(~, ~)
+            normMEnabled = logical(chkNormM.Value);
+            normHEnabled = logical(chkNormH.Value);
+
+            if ~normMEnabled && ~normHEnabled
+                uialert(dlg, 'Selecciona al menos una salida: normM o normH.', 'Selección requerida');
+                return;
+            end
+
+            binsValue = double(binsField.Value);
+            if ~isfinite(binsValue) || binsValue < 1 || floor(binsValue) ~= binsValue
+                uialert(dlg, 'El valor de bins debe ser un entero positivo.', 'Valor inválido');
+                return;
+            end
+
+            stepValue = double(stepField.Value);
+            brValue = double(brField.Value);
+            if normMEnabled
+                if ~isfinite(stepValue) || stepValue <= 0
+                    uialert(dlg, 'El valor de step_percent debe ser mayor a 0.', 'Valor inválido');
+                    return;
+                end
+                if ~isfinite(brValue) || brValue <= 0
+                    uialert(dlg, 'El valor de Br debe ser mayor a 0.', 'Valor inválido');
+                    return;
+                end
+            end
+
+            hcbValue = [];
+            hcjValue = [];
+            hkneeValue = [];
+            hlinearEndValue = [];
+            extraH = struct('name', {}, 'value', {});
+
+            if normHEnabled
+                hcbValue = parse_required_threshold(hcbField.Value, 'Hcb');
+                if isempty(hcbValue); return; end
+                hcjValue = parse_required_threshold(hcjField.Value, 'Hcj');
+                if isempty(hcjValue); return; end
+                hkneeValue = parse_required_threshold(hkneeField.Value, 'Hknee');
+                if isempty(hkneeValue); return; end
+                hlinearEndValue = parse_required_threshold(hlinearEndField.Value, 'Hlinear_end');
+                if isempty(hlinearEndValue); return; end
+
+                extraData = extraTable.Data;
+                if ~isempty(extraData)
+                    for iRow = 1:size(extraData, 1)
+                        rowName = '';
+                        if size(extraData, 2) >= 1
+                            rowName = strtrim(char(string(extraData{iRow, 1})));
+                        end
+
+                        rowValue = NaN;
+                        if size(extraData, 2) >= 2
+                            rowValue = extraData{iRow, 2};
+                        end
+
+                        if isempty(rowName) && (isempty(rowValue) || (isnumeric(rowValue) && isnan(rowValue)))
+                            continue;
+                        end
+
+                        if isempty(rowName)
+                            uialert(dlg, sprintf('Fila %d en Additional H values: Name es obligatorio.', iRow), 'Fila inválida');
+                            return;
+                        end
+
+                        rowValueNum = str2double(strtrim(char(string(rowValue))));
+                        if ~isfinite(rowValueNum)
+                            uialert(dlg, sprintf('Fila %d en Additional H values: Value debe ser numérico.', iRow), 'Fila inválida');
+                            return;
+                        end
+
+                        extraH(end+1).name = rowName; %#ok<AGROW>
+                        extraH(end).value = rowValueNum;
+                    end
+                end
+            end
+
+            cfg = struct(...
+                'bins', floor(binsValue), ...
+                'stepPercent', stepValue, ...
+                'br', brValue, ...
+                'normMEnabled', normMEnabled, ...
+                'normHEnabled', normHEnabled, ...
+                'normH', struct(...
+                    'enabled', normHEnabled, ...
+                    'Hcb', hcbValue, ...
+                    'Hcj', hcjValue, ...
+                    'Hknee', hkneeValue, ...
+                    'Hlinear_end', hlinearEndValue, ...
+                    'extraH', extraH));
+
+            setpref('ComsolAnalyzer', 'MagnetsHistogramBins', cfg.bins);
+            setpref('ComsolAnalyzer', 'MagnetsHistogramStepPercent', cfg.stepPercent);
+            setpref('ComsolAnalyzer', 'MagnetsHistogramBr', cfg.br);
+
+            ok = true;
+            if isvalid(dlg)
+                uiresume(dlg);
+                unregisterChildDialog(dlg);
+                delete(dlg);
+            end
+        end
+
+        function value = parse_required_threshold(rawValue, fieldName)
+            value = [];
+            candidate = str2double(strtrim(char(string(rawValue))));
+            if ~isfinite(candidate)
+                uialert(dlg, sprintf('El valor de %s debe ser numérico (kA/m).', fieldName), 'Valor inválido');
+                return;
+            end
+            value = candidate;
+        end
+
+        function on_cancel(~, ~)
+            ok = false;
+            if isvalid(dlg)
+                uiresume(dlg);
+                unregisterChildDialog(dlg);
+                delete(dlg);
+            end
+        end
+    end
+
+    function [ok, projectionOrthoScale] = ask_projection_orthoscale()
+        ok = false;
+        projectionOrthoScale = getpref('ComsolAnalyzer', 'ProjectionOrthoScale', 0.35);
+
+        answer = inputdlg( ...
+            {'Projection orthoscale (For zoomout increase orthoscale):'}, ...
+            'Projection orthoscale', ...
+            1, ...
+            {num2str(projectionOrthoScale)});
+        if isempty(answer)
+            return;
+        end
+
+        candidate = str2double(strtrim(answer{1}));
+        if isnan(candidate) || ~isfinite(candidate) || candidate <= 0
+            uialert(fig, 'Enter a positive orthoscale value. For zoomout increase orthoscale.', 'Invalid value');
+            return;
+        end
+
+        projectionOrthoScale = candidate;
+        setpref('ComsolAnalyzer', 'ProjectionOrthoScale', projectionOrthoScale);
+        ok = true;
+    end
+
+    function shouldProceed = preview_custom_coordinate_configuration(coordCfg, coords, previewText)
+        shouldProceed = false;
+        previewFig = [];
+
+        try
+            previewFig = uifigure('Name', 'Custom Coordinates Preview', ...
+                'Position', [220 120 820 680], ...
+                'WindowStyle', 'modal', ...
+                'Resize', 'on');
+            previewFig.Tag = 'ComsolAnalyzerChildDialog';
+            registerChildDialog(previewFig);
+
+            uilabel(previewFig, ...
+                'Text', previewText, ...
+                'Position', [20 640 760 22], ...
+                'FontWeight', 'bold');
+
+            ax = uiaxes(previewFig, 'Position', [20 90 780 510]);
+            scatter3(ax, coords(:, 1), coords(:, 2), coords(:, 3), 40, coords(:, 3), 'filled');
+            grid(ax, 'on');
+            axis(ax, 'equal');
+            view(ax, 3);
+            xlabel(ax, 'X [m]');
+            ylabel(ax, 'Y [m]');
+            zlabel(ax, 'Z [m]');
+            title(ax, 'Preview de puntos seleccionados');
+            colormap(ax, inferno_colormap(256));
+
+            btnYes = uibutton(previewFig, 'push', ...
+                'Text', 'Yes, use these points', ...
+                'Position', [520 24 140 34], ...
+                'ButtonPushedFcn', @on_preview_yes, ...
+                'FontWeight', 'bold');
+            btnNo = uibutton(previewFig, 'push', ...
+                'Text', 'No, edit values', ...
+                'Position', [670 24 130 34], ...
+                'ButtonPushedFcn', @on_preview_no);
+            btnYes.Enable = 'on';
+            btnNo.Enable = 'on';
+
+            previewFig.CloseRequestFcn = @on_preview_no;
+            uiwait(previewFig);
+        catch err
+            if ~isempty(previewFig) && isvalid(previewFig)
+                unregisterChildDialog(previewFig);
+                delete(previewFig);
+            end
+            uialert(fig, ['No se pudo generar la previsualizacion de coordenadas: ' err.message], ...
+                'Preview error');
+            return;
+        end
+
+        function on_preview_yes(~, ~)
+            shouldProceed = true;
+            close_preview_figure();
+        end
+
+        function on_preview_no(~, ~)
+            shouldProceed = false;
+            close_preview_figure();
+        end
+
+        function close_preview_figure()
+            if ~isempty(previewFig) && isvalid(previewFig)
+                try
+                    uiresume(previewFig);
+                catch
+                end
+                unregisterChildDialog(previewFig);
+                delete(previewFig);
+            end
+        end
+    end
+
+    function coords = build_spherical_coordinate_matrix(nTheta, nPhi, rMeters)
+        theta = linspace(0, 2*pi, nTheta);
+        phi = linspace(0, pi, nPhi);
+        [thetaGrid, phiGrid] = meshgrid(theta, phi);
+
+        xCoords = rMeters .* sin(phiGrid) .* cos(thetaGrid);
+        yCoords = rMeters .* sin(phiGrid) .* sin(thetaGrid);
+        zCoords = rMeters .* cos(phiGrid);
+        coords = [xCoords(:), yCoords(:), zCoords(:)];
+    end
+
+    function previewFilePath = write_coordinate_preview_file(coordCfg, coords)
+        fileName = sprintf('Coordinates_Spherical_coord_ntheta_%d_nphi_%d_R%smm.txt', ...
+            coordCfg.nTheta, coordCfg.nPhi, format_mm_token(coordCfg.R * 1000));
+        previewFilePath = fullfile(tempdir, fileName);
+        writematrix(coords, previewFilePath, 'Delimiter', 'tab');
+    end
+
+    function token = format_mm_token(rMm)
+        if abs(rMm - round(rMm)) < 1e-9
+            token = sprintf('%d', round(rMm));
+            return;
+        end
+
+        token = sprintf('%.6f', rMm);
+        token = regexprep(token, '0+$', '');
+        token = regexprep(token, '\.$', '');
+        token = strrep(token, '.', 'p');
+    end
+
+    function tf = isFigureClosing()
+        tf = ~isvalid(fig);
+        if tf
+            return;
+        end
+
+        s = fig.UserData;
+        tf = isfield(s, 'isClosing') && logical(s.isClosing);
+    end
+
+    function registerChildDialog(dlg)
+        if isFigureClosing() || ~isvalid(dlg)
+            return;
+        end
+
+        s = fig.UserData;
+        validDialogs = getValidChildDialogs(s.childDialogs);
+        s.childDialogs = [validDialogs; {dlg}]; %#ok<AGROW>
+        fig.UserData = s;
+    end
+
+    function unregisterChildDialog(dlg)
+        if ~isvalid(fig)
+            return;
+        end
+
+        s = fig.UserData;
+        if isempty(s.childDialogs)
+            return;
+        end
+
+        remaining = getValidChildDialogs(s.childDialogs);
+        remaining = remaining(~cellfun(@(item) item == dlg, remaining));
+        s.childDialogs = remaining;
+        fig.UserData = s;
+    end
+
+    function validDialogs = getValidChildDialogs(dialogList)
+        if isempty(dialogList)
+            validDialogs = {};
+            return;
+        end
+
+        validDialogs = dialogList(cellfun(@(item) isvalid(item), dialogList));
+    end
+
+    function closeMainFigure(src, ~)
+        if ~isvalid(src)
+            return;
+        end
+
+        s = src.UserData;
+        if isfield(s, 'isClosing') && logical(s.isClosing)
+            return;
+        end
+
+        s.isClosing = true;
+        s.model = [];
+        s.datasets = [];
+        src.UserData = s;
+
+        stopExtractionHeartbeat([]);
+
+        if isfield(s, 'childDialogs') && ~isempty(s.childDialogs)
+            validDialogs = getValidChildDialogs(s.childDialogs);
+            for idx = 1:numel(validDialogs)
+                dlg = validDialogs{idx};
+                try
+                    uiresume(dlg);
+                catch
+                end
+                try
+                    delete(dlg);
+                catch
+                end
+            end
+        end
+
+        delete(src);
+    end
+
+refreshConnectionStatus('status', false);
+layoutControls();
+updateRunButtonState();
+
+end

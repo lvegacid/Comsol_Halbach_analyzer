@@ -1,0 +1,357 @@
+function [outputDataPath, outputPngPath] = export_custom_coordinates_XYZ(model, datasetTag, outputDir, coordCfg, selectionTag)
+% export_custom_coordinates  Exporta B_FOV en coordenadas custom (esféricas).
+%
+% Entradas:
+%   model       (com.comsol.model.Model)
+%   datasetTag  (char)
+%   outputDir   (char) — directorio destino del dataset
+%   coordCfg    (struct) con campos:
+%       .model  (char)   — solo "Spherical coordinates"
+%       .nTheta (double)
+%       .nPhi   (double)
+%       .R      (double)  [m]
+%
+% Salidas:
+%   outputDataPath  (char) — TXT con Bx, By, Bz, normB
+%   outputPngPath   (char) — PNG de visualización rápida
+
+    if nargin < 4 || ~isstruct(coordCfg)
+        error('Se requiere coordCfg con model, nTheta, nPhi y R.');
+    end
+    if nargin < 5
+        selectionTag = '';
+    end
+
+    workingDatasetTag = datasetTag;
+    tempDatasetTag = ['dset_coord_' regexprep(datasetTag, '[^a-zA-Z0-9_]', '_')];
+
+    coordSource = 'spherical';
+    if isfield(coordCfg, 'source') && ~isempty(coordCfg.source)
+        coordSource = lower(strtrim(char(coordCfg.source)));
+    end
+    isFileSource = strcmp(coordSource, 'file');
+    coordFilePath = '';
+
+    switch coordSource
+        case 'file'
+            sourceFilePath = get_struct_value(coordCfg, 'sourceFilePath', '');
+            if isempty(sourceFilePath) && isfield(coordCfg, 'coordFilePath')
+                sourceFilePath = coordCfg.coordFilePath;
+            end
+
+            coordColumns = get_struct_value(coordCfg, 'coordColumns', [1 2 3]);
+            coordColumns = double(coordColumns(:).');
+
+            if isempty(sourceFilePath) || ~isfile(sourceFilePath)
+                error('Se requiere un archivo de coordenadas valido para el modo From file.');
+            end
+
+            if numel(coordColumns) ~= 3 || any(coordColumns < 1) || any(floor(coordColumns) ~= coordColumns) || ...
+               numel(unique(coordColumns)) ~= 3
+                error('Las columnas de coordenadas deben ser tres enteros positivos y distintos.');
+            end
+
+            data = readmatrix(sourceFilePath, 'FileType', 'text', 'CommentStyle', '%');
+            if isempty(data) || size(data, 2) < 3
+                error('El archivo de coordenadas debe contener al menos 3 columnas.');
+            end
+            if size(data, 2) < max(coordColumns)
+                error('El archivo de coordenadas solo tiene %d columnas y se solicitaron las columnas %s.', ...
+                    size(data, 2), mat2str(coordColumns));
+            end
+
+            coords = data(:, coordColumns);
+            coords = coords(all(isfinite(coords), 2), :);
+            if isempty(coords)
+                error('No se encontraron coordenadas validas en las columnas seleccionadas.');
+            end
+
+            coordFilePath = build_temp_export_path('txt', ['coord_' datasetTag]);
+            writematrix(coords, coordFilePath, 'Delimiter', 'tab');
+
+            [~, sourceBaseName, ~] = fileparts(sourceFilePath);
+            safeBaseName = make_safe_name(sourceBaseName);
+            baseTag = sprintf('FromFile_%s_cols_%d_%d_%d', safeBaseName, coordColumns(1), coordColumns(2), coordColumns(3));
+
+        otherwise
+            nTheta = get_struct_value(coordCfg, 'nTheta', 100);
+            nPhi   = get_struct_value(coordCfg, 'nPhi', 100);
+            rMeters = get_struct_value(coordCfg, 'R', 0.1);
+
+            nTheta = floor(double(nTheta));
+            nPhi   = floor(double(nPhi));
+            rMeters = double(rMeters);
+
+            if ~isfinite(nTheta) || nTheta < 1 || ~isfinite(nPhi) || nPhi < 1 || ...
+               ~isfinite(rMeters) || rMeters <= 0
+                error('Parámetros inválidos de coordenadas: nTheta, nPhi y R deben ser positivos.');
+            end
+
+            rMmToken = format_mm_token(rMeters * 1000);
+            baseTag = sprintf('Spherical_coord_ntheta_%d_nphi_%d_R%smm', nTheta, nPhi, rMmToken);
+
+            coordFilePath = build_temp_export_path('txt', ['coord_' datasetTag]);
+            generate_spherical_coordinates_file(coordFilePath, nTheta, nPhi, rMeters);
+            validate_generated_coordinate_file(coordFilePath, rMeters);
+    end
+
+    coordFileName = ['Coordinates_' baseTag '.txt'];
+
+    outputBaseName = '';
+    if isfield(coordCfg, 'outputBaseName') && ~isempty(coordCfg.outputBaseName)
+        outputBaseName = strtrim(char(coordCfg.outputBaseName));
+    end
+
+    if isempty(outputBaseName)
+        dataFileName  = ['B_coordinates_' baseTag '.txt'];
+        pngFileName   = ['B_coordinates_' baseTag '.png'];
+    else
+        dataFileName = [outputBaseName '.txt'];
+        pngFileName = [outputBaseName '.png'];
+    end
+
+    outputDataPath = fullfile(outputDir, dataFileName);
+    outputPngPath  = fullfile(outputDir, pngFileName);
+    tempDataPath   = build_temp_export_path('txt', ['data_' datasetTag]);
+
+    exportTag = ['data_' regexprep(datasetTag, '[^a-zA-Z0-9_]', '_')];
+
+    try
+        ensure_parent_dir_exists(outputDataPath);
+        ensure_parent_dir_exists(outputPngPath);
+
+        try; model.result.export.remove(exportTag); catch; end
+
+        if ~isempty(selectionTag)
+            try; model.result.dataset.remove(tempDatasetTag); catch; end
+            model.result.dataset.duplicate(tempDatasetTag, datasetTag);
+            model.result.dataset(tempDatasetTag).selection.geom('geom1', 3);
+            model.result.dataset(tempDatasetTag).selection.named(selectionTag);
+            workingDatasetTag = tempDatasetTag;
+        end
+
+        model.result.export.create(exportTag, 'Data');
+        model.result.export(exportTag).set('data', workingDatasetTag);
+        model.result.export(exportTag).set('location', 'file');
+        model.result.export(exportTag).set('coordfilename', coordFilePath);
+        model.result.export(exportTag).set('expr', {'mfnc.Bx' 'mfnc.By' 'mfnc.Bz' 'mfnc.normB'});
+        model.result.export(exportTag).set('unit', {'mT' 'mT' 'mT' 'mT'});
+        model.result.export(exportTag).set('descr', {'Bx' 'By' 'Bz' 'normB'});
+        model.result.export(exportTag).set('filename', tempDataPath);
+        model.result.export(exportTag).run;
+
+        if ~isFileSource
+            validate_exported_coordinate_radius(tempDataPath, rMeters);
+        end
+        plotTitle = 'B_FOV Custom Coordinates';
+        if isfield(coordCfg, 'plotTitle') && ~isempty(coordCfg.plotTitle)
+            plotTitle = char(coordCfg.plotTitle);
+        end
+
+        fieldAxisForPlot = 'Y';
+        if isfield(coordCfg, 'fieldAxis') && ~isempty(coordCfg.fieldAxis) && ...
+                ismember(upper(char(coordCfg.fieldAxis)), {'X', 'Y', 'Z'})
+            fieldAxisForPlot = upper(char(coordCfg.fieldAxis));
+        end
+
+        create_custom_coordinates_png(tempDataPath, outputPngPath, plotTitle, fieldAxisForPlot);
+        move_file_overwrite(tempDataPath, outputDataPath);
+
+    catch cause
+        try; model.result.export.remove(exportTag); catch; end
+        try; model.result.dataset.remove(tempDatasetTag); catch; end
+        try
+            if exist(coordFilePath, 'file')
+                delete(coordFilePath);
+            end
+        catch
+        end
+        try
+            if exist(tempDataPath, 'file')
+                delete(tempDataPath);
+            end
+        catch
+        end
+        throw(MException('ComsolAnalyzer:exportCustomCoordinates', ...
+            'Error exportando coordenadas custom para dataset "%s": %s', ...
+            datasetTag, cause.message));
+    end
+
+    try; model.result.export.remove(exportTag); catch; end
+    try; model.result.dataset.remove(tempDatasetTag); catch; end
+
+    % El archivo Coordinates_*.txt es temporal y se elimina al finalizar.
+    try
+        if exist(coordFilePath, 'file')
+            delete(coordFilePath);
+        end
+    catch
+    end
+    try
+        if exist(tempDataPath, 'file')
+            delete(tempDataPath);
+        end
+    catch
+    end
+end
+
+% -------------------------------------------------------------------------
+function generate_spherical_coordinates_file(filePath, nTheta, nPhi, rMeters)
+    theta = linspace(0, 2*pi, nTheta);
+    phi = linspace(0, pi, nPhi);
+
+    [thetaGrid, phiGrid] = meshgrid(theta, phi);
+
+    x = rMeters .* sin(phiGrid) .* cos(thetaGrid);
+    y = rMeters .* sin(phiGrid) .* sin(thetaGrid);
+    z = rMeters .* cos(phiGrid);
+
+    coords = [x(:), y(:), z(:)];
+    writematrix(coords, filePath, 'Delimiter', 'tab');
+end
+
+% -------------------------------------------------------------------------
+function validate_generated_coordinate_file(filePath, expectedRadiusMeters)
+    coords = readmatrix(filePath, 'FileType', 'text');
+    if isempty(coords) || size(coords, 2) < 3
+        error('No se pudieron validar las coordenadas generadas en %s.', filePath);
+    end
+
+    radius = sqrt(sum(coords(:, 1:3).^2, 2));
+    tolerance = max(1e-9, expectedRadiusMeters * 1e-9);
+    maxDelta = max(abs(radius - expectedRadiusMeters));
+    if ~isfinite(maxDelta) || maxDelta > tolerance
+        error(['Las coordenadas generadas no corresponden a una esfera de radio %.9g m ' ...
+            '(desviacion maxima %.3e m).'], expectedRadiusMeters, maxDelta);
+    end
+end
+
+% -------------------------------------------------------------------------
+function validate_exported_coordinate_radius(inputTxtPath, expectedRadiusMeters)
+    data = readmatrix(inputTxtPath, 'FileType', 'text', 'CommentStyle', '%');
+
+    if isempty(data) || size(data, 2) < 3
+        error('No se pudieron validar las coordenadas exportadas en %s.', inputTxtPath);
+    end
+
+    coords = data(:, 1:3);
+    radius = sqrt(sum(coords.^2, 2));
+    maxRadius = max(radius);
+    minRadius = min(radius);
+    tolerance = max(5e-4, expectedRadiusMeters * 5e-3);
+
+    if ~isfinite(maxRadius) || ~isfinite(minRadius)
+        error('La exportacion de coordenadas contiene radios no finitos en %s.', inputTxtPath);
+    end
+
+    if abs(maxRadius - expectedRadiusMeters) > tolerance || ...
+       abs(minRadius - expectedRadiusMeters) > tolerance
+        error(['Radio exportado por COMSOL fuera de tolerancia. ' ...
+            'R solicitado = %.6f m, radio minimo = %.6f m, radio maximo = %.6f m. ' ...
+            'Revisa la unidad de longitud del modelo y las columnas exportadas.'], ...
+            expectedRadiusMeters, minRadius, maxRadius);
+    end
+end
+
+% -------------------------------------------------------------------------
+function create_custom_coordinates_png(inputTxtPath, outputPngPath, plotTitle, fieldAxis)
+    if nargin < 3 || isempty(plotTitle)
+        plotTitle = 'B_FOV Custom Coordinates';
+    end
+    if nargin < 4 || isempty(fieldAxis) || ~ismember(upper(char(fieldAxis)), {'X', 'Y', 'Z'})
+        fieldAxis = 'Y';
+    end
+    fieldAxis = upper(char(fieldAxis));
+
+    data = readmatrix(inputTxtPath, 'FileType', 'text', 'CommentStyle', '%');
+
+    if isempty(data) || size(data, 2) < 7
+        error('No se pudo generar PNG de coordenadas: datos insuficientes en %s', inputTxtPath);
+    end
+
+    x = data(:, 1);
+    y = data(:, 2);
+    z = data(:, 3);
+    % Columnas 4,5,6,7 = Bx, By, Bz, normB (orden fijo del export 'expr').
+    fieldColumns = struct('X', 4, 'Y', 5, 'Z', 6);
+    bField = data(:, fieldColumns.(fieldAxis));
+
+    fig = figure('Visible', 'off', 'Color', 'w', 'Position', [100 100 900 700]);
+    ax = axes(fig);
+    scatter3(ax, x, y, z, 48, bField, 'filled');
+    grid(ax, 'on');
+    xlabel(ax, 'X [m]');
+    ylabel(ax, 'Y [m]');
+    zlabel(ax, 'Z [m]');
+    title(ax, plotTitle, 'Interpreter', 'none');
+    colormap(ax, inferno_colormap(256));
+    cb = colorbar(ax);
+    cb.Label.String = sprintf('B%s [mT]', lower(fieldAxis));
+    axis(ax, 'equal');
+    view(ax, 3);
+
+    exportgraphics(fig, outputPngPath, 'Resolution', 140);
+    close(fig);
+end
+
+% -------------------------------------------------------------------------
+function ensure_parent_dir_exists(filePath)
+    parentDir = fileparts(filePath);
+    if isempty(parentDir)
+        return;
+    end
+    if ~exist(parentDir, 'dir')
+        [ok, msg] = mkdir(parentDir);
+        if ~ok
+            error('No se pudo crear directorio de salida: %s', msg);
+        end
+    end
+end
+
+% -------------------------------------------------------------------------
+function tempPath = build_temp_export_path(ext, tag)
+    safeTag = regexprep(tag, '[^a-zA-Z0-9_]', '_');
+    stamp = char(java.util.UUID.randomUUID());
+    stamp = regexprep(stamp, '-', '');
+    tempPath = fullfile(tempdir, sprintf('comsol_%s_%s.%s', safeTag, stamp, ext));
+end
+
+% -------------------------------------------------------------------------
+function move_file_overwrite(srcPath, dstPath)
+    if ~exist(srcPath, 'file')
+        error('El archivo temporal de export no existe: %s', srcPath);
+    end
+
+    ensure_parent_dir_exists(dstPath);
+
+    if exist(dstPath, 'file')
+        delete(dstPath);
+    end
+
+    [ok, msg] = movefile(srcPath, dstPath, 'f');
+    if ~ok
+        error('No se pudo mover archivo temporal a destino final: %s', msg);
+    end
+end
+
+% -------------------------------------------------------------------------
+function value = get_struct_value(s, fieldName, defaultValue)
+    if isfield(s, fieldName) && ~isempty(s.(fieldName))
+        value = s.(fieldName);
+    else
+        value = defaultValue;
+    end
+end
+
+% -------------------------------------------------------------------------
+function token = format_mm_token(rMm)
+    if abs(rMm - round(rMm)) < 1e-9
+        token = sprintf('%d', round(rMm));
+        return;
+    end
+
+    token = sprintf('%.6f', rMm);
+    token = regexprep(token, '0+$', '');
+    token = regexprep(token, '\.$', '');
+    token = strrep(token, '.', 'p');
+end

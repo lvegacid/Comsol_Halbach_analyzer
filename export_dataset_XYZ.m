@@ -1,0 +1,698 @@
+% export_dataset  Exporta PNG y TXT para un dataset usando el flujo COMSOL
+% validado por el usuario.
+%
+% Flujo aplicado:
+%   1) Buscar selection en Definitions con label "FOV" (comp1)
+%   2) Duplicar dataset seleccionado
+%   3) Asignar selection FOV al dataset duplicado
+%   4) Crear PlotGroup3D y exportar PNG
+%   5) Exportar TXT del plot 3D (vol1)
+%   6) Crear PlotGroup1D (Histogram) y exportar TXT
+%
+% Entradas:
+%   model       (com.comsol.model.Model)
+%   datasetTag  (char)  tag del dataset original (ej. dset1)
+%   txtPath     (char)  ruta TXT principal (histograma)
+%   pngPath     (char)  ruta PNG
+%   fieldAxis   (char, opcional) 'X'|'Y'|'Z' — componente de B a extraer.
+%               Por defecto 'Y'.
+%
+% Nota:
+%   Ademas del TXT principal (histograma), se genera un TXT extra para el
+%   plot 3D con sufijo "_plot3d".
+function export_dataset_XYZ(model, datasetTag, txtPath, pngPath, selectionTag, selectionLabel, histBins, projectionOrthoScale, fieldAxis)
+
+    if nargin < 5
+        selectionTag = '';
+    end
+    if nargin < 6
+        selectionLabel = '';
+    end
+    if nargin < 7 || isempty(histBins)
+        histBins = 100;
+    end
+    if nargin < 8 || isempty(projectionOrthoScale)
+        projectionOrthoScale = 0.35;
+    end
+    if nargin < 9 || isempty(fieldAxis) || ~ismember(upper(char(fieldAxis)), {'X', 'Y', 'Z'})
+        fieldAxis = 'Y';
+    end
+    fieldAxis = upper(char(fieldAxis));
+    fieldExpr = ['mfnc.B' lower(fieldAxis)]; % 'mfnc.Bx' | 'mfnc.By' | 'mfnc.Bz'
+    histBins = floor(double(histBins));
+    if ~isfinite(histBins) || histBins < 1
+        histBins = 100;
+    end
+
+    newDsetTag   = ['dset_fov_' datasetTag];
+    dset3dTag    = ['dset_fov3d_' datasetTag];
+    pg3dTag      = ['pg3d_' datasetTag];
+    imgTag       = ['img_' datasetTag];
+    plot3dTag    = ['plot3d_' datasetTag];
+    pg1dTag      = ['pg1d_' datasetTag];
+    plotHistTag  = ['plothist_' datasetTag];
+
+    try
+        cleanup(model, newDsetTag, dset3dTag, pg3dTag, imgTag, plot3dTag, pg1dTag, plotHistTag);
+
+        % Validar conexion del modelo antes de comenzar.
+        assert_model_connected(model, 'inicio export_dataset');
+
+        % Validar dataset origen recibido desde la GUI.
+        assert_dataset_exists(model, datasetTag, 'origen');
+
+        % 1) Seleccion en Definitions (comp1): FOV por defecto, o custom si se recibe.
+        selectedTag = strtrim(char(selectionTag));
+        if isempty(selectedTag)
+            selectedTag = find_fov_selection_tag(model);
+            if isempty(selectedTag)
+                avail = list_comp1_selections(model);
+                error(['No se encontro selection con label "FOV" en Definitions (comp1).\n' ...
+                       'Selections comp1: %s'], avail);
+            end
+        else
+            if ~selection_exists_in_comp1(model, selectedTag)
+                avail = list_comp1_selections(model);
+                error(['No se encontro la selection "%s" en Definitions (comp1).\n' ...
+                       'Selections comp1: %s'], selectedTag, avail);
+            end
+        end
+
+        % 2) Duplicar dataset
+        try
+            model.result.dataset.duplicate(newDsetTag, datasetTag);
+            %model.result.dataset(newDsetTag).updateResult;
+        catch errStage
+            error('Fallo al duplicar dataset (%s -> %s): %s', datasetTag, newDsetTag, errStage.message);
+        end
+
+        assert_dataset_exists(model, newDsetTag, 'duplicado');
+
+        % 3) Asignar selection al dataset duplicado
+        try
+            model.result.dataset(newDsetTag).selection.geom('geom1', 3);
+            model.result.dataset(newDsetTag).selection.named(selectedTag);
+        catch errStage
+            error('Fallo al asignar selection (%s) al dataset %s: %s', selectedTag, newDsetTag, errStage.message);
+        end
+
+        % 4) PlotGroup3D + PNG (usar dataset temporal dedicado para 3D)
+        try
+            model.component("comp1").view("view1").hideObjects().clear();
+            model.result.dataset.duplicate(dset3dTag, datasetTag);
+            model.result.dataset(dset3dTag).selection.geom('geom1', 3);
+            model.result.dataset(dset3dTag).selection.named(selectedTag);
+
+            model.result.create(pg3dTag, 'PlotGroup3D');
+            if ~isempty(selectionLabel)
+                model.result(pg3dTag).label(selectionLabel);
+            end
+        catch errStage
+            error('Fallo al crear PlotGroup3D (%s): %s', pg3dTag, errStage.message);
+        end
+
+        % Este run inicial forma parte del script de referencia, pero en
+        % algunos datasets puede fallar sin afectar el flujo principal.
+        try
+            model.result(pg3dTag).run;
+        catch
+        end
+
+        try
+            model.result(pg3dTag).set('data', dset3dTag);
+            model.result(pg3dTag).create('vol1', 'Volume');
+            model.result(pg3dTag).feature('vol1').set('evaluationsettings', 'parent');
+            model.result(pg3dTag).feature('vol1').set('expr', fieldExpr);
+            model.result(pg3dTag).feature('vol1').set('unit', 'mT');
+            model.result(pg3dTag).feature('vol1').set('colortable', 'Inferno');
+            model.result(pg3dTag).run;
+            model.component("comp1").view("view1").set("transparency", false);
+        catch errStage
+            error('Fallo al configurar/ejecutar PlotGroup3D %s: %s', pg3dTag, errStage.message);
+        end
+
+        % Marker y runs extra: mantener logica del script, pero como paso
+        % opcional para evitar caidas en datasets que no soporten marker.
+        try
+            model.result(pg3dTag).feature('vol1').create('mrkr1', 'Marker');
+            model.result(pg3dTag).run;
+            model.result(pg3dTag).run;
+            model.result(pg3dTag).run;
+            model.result(pg3dTag).run;
+        catch
+        end
+
+        try
+            ensure_parent_dir_exists(pngPath);
+            pngTempPath = build_temp_export_path('png', datasetTag);
+            export_png_with_strategies(model, pg3dTag, imgTag, pngTempPath);
+            try
+                model.result(pg3dTag).run;
+                model.result(pg3dTag).run;
+            catch
+            end
+            move_file_overwrite(pngTempPath, pngPath);
+
+            % Extiende con vistas ortograficas sin alterar el flujo 3D existente.
+            try
+                export_orthographic_views(model, pg3dTag, imgTag, pngPath, datasetTag, projectionOrthoScale);
+            catch
+            end
+        catch errStage
+            error('Fallo al exportar PNG (%s): %s', pngPath, errStage.message);
+        end
+
+        % 5) TXT del plot 3D (vol1)
+        try
+            txtPlot3dPath = derive_plot3d_txt_path_from_png(pngPath);
+            model.result.export.create(plot3dTag, pg3dTag, 'vol1', 'Plot');
+            model.result.export(plot3dTag).set('filename', txtPlot3dPath);
+            model.result.export(plot3dTag).run;
+        catch errStage
+            error('Fallo al exportar TXT 3D (%s): %s', datasetTag, errStage.message);
+        end
+
+% 6) PlotGroup1D Hist + TXT principal
+        try
+            model.result.create(pg1dTag, 'PlotGroup1D');
+            model.result(pg1dTag).set('data', newDsetTag);
+
+            % Set custom X-axis label and title on the PlotGroup container
+            model.result(pg1dTag).set('titletype', 'custom');
+            model.result(pg1dTag).set('title', ['Histogram B' lower(fieldAxis)]);
+            model.result(pg1dTag).set('xlabelactive', true);
+            model.result(pg1dTag).set('xlabel', ['B' lower(fieldAxis)]);
+
+            % Create Histogram feature
+            model.result(pg1dTag).create('hist1', 'Histogram');
+            model.result(pg1dTag).feature('hist1').set('markerpos', 'datapoints');
+            model.result(pg1dTag).feature('hist1').set('linewidth', 'preference');
+            model.result(pg1dTag).feature('hist1').set('evaluationsettings', 'parent');
+            model.result(pg1dTag).feature('hist1').set('expr', fieldExpr);
+            model.result(pg1dTag).feature('hist1').set('unit', 'mT');
+            model.result(pg1dTag).feature('hist1').set('number', histBins);
+            model.result(pg1dTag).feature('hist1').set('function', 'discrete');
+            model.result(pg1dTag).run;
+
+            % Export histogram TXT
+            model.result.export.create(plotHistTag, pg1dTag, 'hist1', 'Plot');
+            model.result.export(plotHistTag).set('filename', txtPath);
+            model.result.export(plotHistTag).run;
+        catch errStage
+            error('Fallo al exportar histograma TXT (%s): %s', datasetTag, errStage.message);
+        end
+
+
+    catch cause
+        cleanup(model, newDsetTag, dset3dTag, pg3dTag, imgTag, plot3dTag, pg1dTag, plotHistTag);
+        throw(MException('ComsolAnalyzer:exportDataset', ...
+            'Error exportando dataset "%s": %s', datasetTag, cause.message));
+    end
+
+    cleanup(model, newDsetTag, dset3dTag, pg3dTag, imgTag, plot3dTag, pg1dTag, plotHistTag);
+end
+
+% -------------------------------------------------------------------------
+function fovTag = find_fov_selection_tag(model)
+    fovTag = '';
+
+    try
+        tags = model.component('comp1').selection.tags();
+    catch
+        tags = [];
+    end
+
+    for i = 1:numel(tags)
+        t = char(tags(i));
+
+        lbl = '';
+        typ = '';
+        try
+            lbl = char(model.component('comp1').selection(t).label());
+        catch
+        end
+        try
+            typ = char(model.component('comp1').selection(t).getType());
+        catch
+        end
+
+        if strcmpi(strtrim(lbl), 'FOV')
+            % Priorizar Explicit, pero aceptar si el label coincide exacto.
+            if isempty(typ) || strcmpi(strtrim(typ), 'Explicit')
+                fovTag = t;
+                return;
+            end
+            if isempty(fovTag)
+                fovTag = t;
+            end
+        end
+    end
+end
+
+% -------------------------------------------------------------------------
+function tf = selection_exists_in_comp1(model, selectionTag)
+    tf = false;
+    if isempty(selectionTag)
+        return;
+    end
+
+    try
+        tags = model.component('comp1').selection.tags();
+    catch
+        tags = [];
+    end
+
+    for i = 1:numel(tags)
+        if strcmp(char(tags(i)), selectionTag)
+            tf = true;
+            return;
+        end
+    end
+end
+
+% -------------------------------------------------------------------------
+function str = list_comp1_selections(model)
+    parts = {};
+
+    try
+        tags = model.component('comp1').selection.tags();
+    catch
+        tags = [];
+    end
+
+    for i = 1:numel(tags)
+        t = char(tags(i));
+        lbl = '?';
+        typ = '?';
+        try; lbl = char(model.component('comp1').selection(t).label()); catch; end
+        try; typ = char(model.component('comp1').selection(t).getType()); catch; end
+        parts{end+1} = sprintf('%s(%s|%s)', t, lbl, typ); %#ok<AGROW>
+    end
+
+    if isempty(parts)
+        str = '(ninguna encontrada)';
+    else
+        str = strjoin(parts, ', ');
+    end
+end
+
+% -------------------------------------------------------------------------
+function outPath = derive_plot3d_txt_path_from_png(pngPath)
+    [folder, name, ~] = fileparts(pngPath);
+    % Ejemplo: BFOV_Linear_model.png -> BFOV_Linear_model.txt
+    outPath = fullfile(folder, [name '.txt']);
+end
+
+% -------------------------------------------------------------------------
+function ensure_parent_dir_exists(filePath)
+    parentDir = fileparts(filePath);
+    if isempty(parentDir)
+        return;
+    end
+    if ~exist(parentDir, 'dir')
+        [ok, msg] = mkdir(parentDir);
+        if ~ok
+            error('No se pudo crear directorio de salida para PNG: %s', msg);
+        end
+    end
+end
+
+% -------------------------------------------------------------------------
+function tempPath = build_temp_export_path(ext, datasetTag)
+    safeTag = regexprep(datasetTag, '[^a-zA-Z0-9_]', '_');
+    stamp = char(java.util.UUID.randomUUID());
+    stamp = regexprep(stamp, '-', '');
+    fname = sprintf('comsol_%s_%s.%s', safeTag, stamp, ext);
+    tempPath = fullfile(tempdir, fname);
+end
+
+% -------------------------------------------------------------------------
+function move_file_overwrite(srcPath, dstPath)
+    if ~exist(srcPath, 'file')
+        error('El archivo temporal de export no existe: %s', srcPath);
+    end
+
+    dstDir = fileparts(dstPath);
+    if ~isempty(dstDir) && ~exist(dstDir, 'dir')
+        [ok, msg] = mkdir(dstDir);
+        if ~ok
+            error('No se pudo crear directorio destino: %s', msg);
+        end
+    end
+
+    if exist(dstPath, 'file')
+        delete(dstPath);
+    end
+
+    [ok, msg] = movefile(srcPath, dstPath, 'f');
+    if ~ok
+        error('No se pudo mover PNG temporal a destino final: %s', msg);
+    end
+end
+
+% -------------------------------------------------------------------------
+function export_orthographic_views(model, pg3dTag, imgTag, mainPngPath, datasetTag, projectionOrthoScale)
+    if nargin < 6 || isempty(projectionOrthoScale)
+        projectionOrthoScale = 0.35;
+    end
+
+    [xyPath, yzPath, xzPath] = derive_orthographic_png_paths(mainPngPath);
+
+    ensure_parent_dir_exists(xyPath);
+    ensure_parent_dir_exists(yzPath);
+    ensure_parent_dir_exists(xzPath);
+
+    ensure_view2_exists(model);
+
+    % Forzar que el PlotGroup3D use la misma vista de camara que ajustamos.
+    try; model.result(pg3dTag).set('view', 'view2'); catch; end
+
+    try; model.result.export.remove(imgTag); catch; end
+    model.result.export.create(imgTag, pg3dTag, 'Image');
+    model.result.export(imgTag).set('size', 'current');
+    model.result.export(imgTag).set('unit', 'px');
+    model.result.export(imgTag).set('height', '600');
+    model.result.export(imgTag).set('width', '800');
+    model.result.export(imgTag).set('lockratio', 'off');
+    model.result.export(imgTag).set('resolution', '96');
+    model.result.export(imgTag).set('antialias', 'on');
+    model.result.export(imgTag).set('zoomextents', 'off');
+    model.result.export(imgTag).set('fontsize', '12');
+    model.result.export(imgTag).set('colortheme', 'globaltheme');
+    model.result.export(imgTag).set('customcolor', [1 1 1]);
+    model.result.export(imgTag).set('background', 'color');
+    model.result.export(imgTag).set('gltfincludelines', 'on');
+    model.result.export(imgTag).set('title1d', 'on');
+    model.result.export(imgTag).set('legend1d', 'on');
+    model.result.export(imgTag).set('logo1d', 'on');
+    model.result.export(imgTag).set('options1d', 'on');
+    model.result.export(imgTag).set('title2d', 'on');
+    model.result.export(imgTag).set('legend2d', 'on');
+    model.result.export(imgTag).set('logo2d', 'on');
+    model.result.export(imgTag).set('options2d', 'off');
+    model.result.export(imgTag).set('title3d', 'on');
+    model.result.export(imgTag).set('legend3d', 'on');
+    model.result.export(imgTag).set('logo3d', 'on');
+    model.result.export(imgTag).set('options3d', 'on');
+    model.result.export(imgTag).set('axisorientation', 'on');
+    model.result.export(imgTag).set('grid', 'on');
+    model.result.export(imgTag).set('axes1d', 'on');
+    model.result.export(imgTag).set('axes2d', 'on');
+    model.result.export(imgTag).set('showgrid', 'on');
+    model.result.export(imgTag).set('target', 'file');
+    model.result.export(imgTag).set('qualitylevel', '92');
+    model.result.export(imgTag).set('qualityactive', 'off');
+    model.result.export(imgTag).set('imagetype', 'png');
+    model.result.export(imgTag).set('lockview', 'on');
+    model.result.export(imgTag).set('highprecisioncolor', 'off');
+    try; model.result.export(imgTag).set('view', 'view2'); catch; end
+
+    % XY view
+    model.component("comp1").view("view2").camera().set("projection", "orthographic");
+    model.component("comp1").view("view2").camera().set("up", [0, 1, 0]);
+    model.component("comp1").view("view2").camera().set("position", [0, 0, 1]);
+    model.component("comp1").view("view2").camera().set("orthoscale", projectionOrthoScale);
+    try; model.result(pg3dTag).run; catch; end
+    export_orthographic_png_with_existing_export(model, imgTag, xyPath, [datasetTag '_xy']);
+
+    % YZ view
+    model.component("comp1").view("view2").camera().set("projection", "orthographic");
+    model.component("comp1").view("view2").camera().set("position", [1, 0, 0]);
+    model.component("comp1").view("view2").camera().set("up", [0, 0, 1]);
+    model.component("comp1").view("view2").camera().set("orthoscale", projectionOrthoScale);
+    try; model.result(pg3dTag).run; catch; end
+    export_orthographic_png_with_existing_export(model, imgTag, yzPath, [datasetTag '_yz']);
+
+    % XZ view
+    model.component("comp1").view("view2").camera().set("projection", "orthographic");
+    model.component("comp1").view("view2").camera().set("position", [0, 1, 0]);
+    model.component("comp1").view("view2").camera().set("up", [0, 0, 1]);
+    model.component("comp1").view("view2").camera().set("orthoscale", projectionOrthoScale);
+    try; model.result(pg3dTag).run; catch; end
+    export_orthographic_png_with_existing_export(model, imgTag, xzPath, [datasetTag '_xz']);
+
+    try; model.result.export.remove(imgTag); catch; end
+end
+
+% -------------------------------------------------------------------------
+function export_orthographic_png_with_existing_export(model, imgTag, finalPath, tempTag)
+    pngTempPath = build_temp_export_path('png', tempTag);
+    model.result.export(imgTag).set('pngfilename', pngTempPath);
+    model.result.export(imgTag).run;
+    move_file_overwrite(pngTempPath, finalPath);
+end
+
+% -------------------------------------------------------------------------
+function [xyPath, yzPath, xzPath] = derive_orthographic_png_paths(mainPngPath)
+    [folder, name, ext] = fileparts(mainPngPath);
+
+    baseName = regexprep(name, '_3DPlot$', '');
+    if strcmp(baseName, name)
+        baseName = regexprep(name, '3DPlot$', '');
+    end
+
+    if strcmp(baseName, name)
+        baseName = name;
+    end
+
+    xyPath = fullfile(folder, [baseName '_XY' ext]);
+    yzPath = fullfile(folder, [baseName '_YZ' ext]);
+    xzPath = fullfile(folder, [baseName '_XZ' ext]);
+end
+
+% -------------------------------------------------------------------------
+function ensure_view2_exists(model)
+    try
+        model.component('comp1').view('view2');
+    catch
+        model.component('comp1').view().create('view2', 'geom1');
+    end
+end
+
+% -------------------------------------------------------------------------
+function export_png_with_strategies(model, pg3dTag, imgTag, pngOutPath)
+    % Estrategia A: COMSOL Image export nativo con legend3d=on (incluye escala de color).
+    try
+        try; model.result.export.remove(imgTag); catch; end
+        model.result.export.create(imgTag, pg3dTag, 'Image');
+        model.result.export(imgTag).set('size', 'current');
+        model.result.export(imgTag).set('unit', 'px');
+        model.result.export(imgTag).set('height', '600');
+        model.result.export(imgTag).set('width', '800');
+        model.result.export(imgTag).set('lockratio', 'off');
+        model.result.export(imgTag).set('resolution', '96');
+        model.result.export(imgTag).set('antialias', 'on');
+        model.result.export(imgTag).set('zoomextents', 'off');
+        model.result.export(imgTag).set('fontsize', '12');
+        model.result.export(imgTag).set('colortheme', 'globaltheme');
+        model.result.export(imgTag).set('customcolor', [1 1 1]);
+        model.result.export(imgTag).set('background', 'color');
+        model.result.export(imgTag).set('gltfincludelines', 'on');
+        model.result.export(imgTag).set('title1d', 'on');
+        model.result.export(imgTag).set('legend1d', 'on');
+        model.result.export(imgTag).set('logo1d', 'on');
+        model.result.export(imgTag).set('options1d', 'on');
+        model.result.export(imgTag).set('title2d', 'on');
+        model.result.export(imgTag).set('legend2d', 'on');
+        model.result.export(imgTag).set('logo2d', 'on');
+        model.result.export(imgTag).set('options2d', 'off');
+        model.result.export(imgTag).set('title3d', 'on');
+        model.result.export(imgTag).set('legend3d', 'on');
+        model.result.export(imgTag).set('logo3d', 'on');
+        model.result.export(imgTag).set('options3d', 'on');
+        model.result.export(imgTag).set('axisorientation', 'on');
+        model.result.export(imgTag).set('grid', 'on');
+        model.result.export(imgTag).set('axes1d', 'on');
+        model.result.export(imgTag).set('axes2d', 'on');
+        model.result.export(imgTag).set('showgrid', 'on');
+        model.result.export(imgTag).set('target', 'file');
+        model.result.export(imgTag).set('qualitylevel', '92');
+        model.result.export(imgTag).set('qualityactive', 'off');
+        model.result.export(imgTag).set('imagetype', 'png');
+        model.result.export(imgTag).set('lockview', 'off');
+        model.result.export(imgTag).set('highprecisioncolor', 'off');
+        model.result.export(imgTag).set('pngfilename', pngOutPath);
+        model.result.export(imgTag).run;
+        try; model.result.export.remove(imgTag); catch; end
+        return;
+    catch errA
+        try; model.result.export.remove(imgTag); catch; end
+    end
+
+    % Estrategia B (fallback): mphplot + exportgraphics.
+    try
+        export_png_via_mphplot(model, pg3dTag, pngOutPath);
+        return;
+    catch errB
+        error('PNG COMSOL export.run fallo: %s | PNG mphplot fallo: %s', errA.message, errB.message);
+    end
+end
+
+% -------------------------------------------------------------------------
+function export_png_via_mphplot(model, pg3dTag, pngOutPath)
+    existingFigures = findall(0, 'Type', 'figure');
+    fig = [];
+    try
+        mphplot(model, pg3dTag);
+        drawnow;
+
+        currentFigures = findall(0, 'Type', 'figure');
+        newFigures = setdiff(currentFigures, existingFigures);
+        if ~isempty(newFigures)
+            fig = newFigures(1);
+        else
+            fig = gcf;
+        end
+
+        try
+            set(fig, 'Visible', 'off');
+        catch
+        end
+
+        apply_export_axes_style(fig);
+        ensure_color_scale_visible(fig);
+        drawnow;
+        try
+            exportgraphics(fig, pngOutPath, 'Resolution', 96);
+        catch
+            saveas(fig, pngOutPath);
+        end
+    catch cause
+        try
+            if ~isempty(fig) && isvalid(fig)
+                close(fig);
+            end
+        catch
+        end
+        rethrow(cause);
+    end
+    try
+        if ~isempty(fig) && isvalid(fig)
+            close(fig);
+        end
+    catch
+    end
+end
+
+% -------------------------------------------------------------------------
+function ensure_color_scale_visible(fig)
+    if isempty(fig) || ~isvalid(fig)
+        return;
+    end
+
+    hasColorBar = ~isempty(findall(fig, 'Type', 'ColorBar'));
+    if hasColorBar
+        return;
+    end
+
+    ax = findall(fig, 'Type', 'Axes');
+    if isempty(ax)
+        return;
+    end
+
+    for i = 1:numel(ax)
+        try
+            colorbar(ax(i));
+            return;
+        catch
+        end
+    end
+end
+
+% -------------------------------------------------------------------------
+function apply_export_axes_style(fig)
+    if isempty(fig) || ~isvalid(fig)
+        return;
+    end
+
+    ax = findall(fig, 'Type', 'Axes');
+    if isempty(ax)
+        return;
+    end
+
+    for i = 1:numel(ax)
+        try
+            grid(ax(i), 'on');
+        catch
+        end
+        try
+            ax(i).XGrid = 'on';
+            ax(i).YGrid = 'on';
+            ax(i).ZGrid = 'on';
+        catch
+        end
+        try
+            ax(i).Visible = 'on';
+            box(ax(i), 'on');
+        catch
+        end
+    end
+end
+
+% -------------------------------------------------------------------------
+function assert_dataset_exists(model, tag, whichOne)
+    assert_model_connected(model, ['validacion dataset ' whichOne]);
+    if ~dataset_exists(model, tag)
+        availDsets = list_result_datasets(model);
+        error('El dataset %s "%s" no existe en model.result.dataset. Datasets disponibles: %s', ...
+            whichOne, tag, availDsets);
+    end
+end
+
+% -------------------------------------------------------------------------
+function tf = dataset_exists(model, tag)
+    tf = false;
+    try
+        model.result.dataset(tag);
+        tf = true;
+    catch
+        tf = false;
+    end
+end
+
+% -------------------------------------------------------------------------
+function assert_model_connected(model, context)
+    try
+        model.result.dataset.tags();
+    catch err
+        error('Sesion COMSOL no conectada durante "%s": %s', context, err.message);
+    end
+end
+
+% -------------------------------------------------------------------------
+function str = list_result_datasets(model)
+    parts = {};
+    try
+        tags = model.result.dataset.tags();
+    catch err
+        str = ['(no disponible: ' err.message ')'];
+        return;
+    end
+
+    for i = 1:numel(tags)
+        t = char(tags(i));
+        lbl = '?';
+        try
+            lbl = char(model.result.dataset(t).label());
+        catch
+        end
+        parts{end+1} = sprintf('%s(%s)', t, lbl); %#ok<AGROW>
+    end
+
+    if isempty(parts)
+        str = '(ninguno encontrado)';
+    else
+        str = strjoin(parts, ', ');
+    end
+end
+
+% -------------------------------------------------------------------------
+function cleanup(model, newDsetTag, dset3dTag, pg3dTag, imgTag, plot3dTag, pg1dTag, plotHistTag)
+    try; model.result.export.remove(plotHistTag); catch; end
+    try; model.result.export.remove(plot3dTag);   catch; end
+    try; model.result.export.remove(imgTag);      catch; end
+    try; model.result.remove(pg1dTag);            catch; end
+    try; model.result.remove(pg3dTag);            catch; end
+    try; model.result.dataset.remove(dset3dTag);  catch; end
+    try; model.result.dataset.remove(newDsetTag); catch; end
+end

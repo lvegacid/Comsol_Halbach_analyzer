@@ -36,6 +36,11 @@ Analysis    =  "Nonlinear/B_r=1.38T/H_c=-868kA/m"#"Flat/B_r=1.4T"#"Nonlinear/B_r
 def parse_args():
     parser = argparse.ArgumentParser(description="BFOV histogram plot postprocess")
     parser.add_argument("--file-path", dest="file_path", help="Ruta al TXT BFOV")
+    parser.add_argument("--raw-bfov-file", dest="raw_bfov_file", help="Ruta al TXT crudo [x y z B] para construir el histograma BFOV")
+    parser.add_argument("--raw-b-column", dest="raw_b_column", type=int, default=4, help="Columna 1-based que contiene B en el TXT crudo")
+    parser.add_argument("--hist-bins", dest="hist_bins", type=int, default=100, help="Numero de bins para construir el histograma BFOV desde TXT crudo")
+    parser.add_argument("--output-hist-txt", dest="output_hist_txt", help="Ruta del TXT de histograma BFOV [bin_center, counts]")
+    parser.add_argument("--output-hist-normalized-txt", dest="output_hist_normalized_txt", help="Ruta del TXT de histograma BFOV normalizado [bin_center, normalized_counts]")
     parser.add_argument("--file-path-m", dest="file_path_m", help="Ruta al TXT Magnets histogram")
     parser.add_argument("--magnet-info", dest="magnet_info", help="Texto Magnet_info")
     parser.add_argument("--fov-info", dest="fov_info", help="Texto FOV_info")
@@ -76,6 +81,83 @@ if args.magnets_only:
     args.bfov_only = True
 
 
+def ensure_parent_dir(path):
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+
+def derive_histogram_output_path(raw_path):
+    raw_dir = os.path.dirname(raw_path)
+    raw_name = os.path.splitext(os.path.basename(raw_path))[0]
+    return os.path.join(raw_dir, f"BFOV_histogram_{raw_name}.txt")
+
+
+def derive_normalized_histogram_output_path(hist_path):
+    root, ext = os.path.splitext(hist_path)
+    return f"{root}_normalized{ext}"
+
+
+def build_histogram_from_raw_bfov(raw_path, b_column_1based, n_bins):
+    raw_data = np.loadtxt(raw_path, comments='%')
+    if raw_data.ndim == 1:
+        raw_data = raw_data.reshape(1, -1)
+
+    b_column_idx = int(b_column_1based) - 1
+    if b_column_idx < 0 or b_column_idx >= raw_data.shape[1]:
+        raise ValueError(
+            f"La columna B solicitada ({b_column_1based}) no existe en {raw_path}. "
+            f"Columnas disponibles: 1..{raw_data.shape[1]}"
+        )
+
+    b_values = raw_data[:, b_column_idx]
+    b_values = b_values[np.isfinite(b_values)]
+    if b_values.size == 0:
+        raise ValueError(f"No hay valores finitos de B en {raw_path}")
+
+    n_bins = max(1, int(n_bins))
+    b_min = float(np.min(b_values))
+    b_max = float(np.max(b_values))
+    if b_max <= b_min:
+        delta = max(1e-12, abs(b_min) * 1e-6 + 1e-12)
+        b_min -= delta
+        b_max += delta
+
+    edges = np.linspace(b_min, b_max, n_bins + 1)
+    counts, edges = np.histogram(b_values, bins=edges)
+    bin_centers = 0.5 * (edges[:-1] + edges[1:])
+    return bin_centers.astype(float), counts.astype(float)
+
+
+def maybe_prepare_histogram_input(parsed_args, default_hist_path):
+    if not parsed_args.raw_bfov_file:
+        return default_hist_path
+
+    histogram_path = parsed_args.output_hist_txt or derive_histogram_output_path(parsed_args.raw_bfov_file)
+    normalized_histogram_path = parsed_args.output_hist_normalized_txt or derive_normalized_histogram_output_path(histogram_path)
+    bin_centers, counts = build_histogram_from_raw_bfov(
+        parsed_args.raw_bfov_file,
+        parsed_args.raw_b_column,
+        parsed_args.hist_bins,
+    )
+
+    ensure_parent_dir(histogram_path)
+    np.savetxt(histogram_path, np.column_stack((bin_centers, counts)), fmt="%.15g", delimiter="\t")
+
+    max_count = float(np.max(counts))
+    if max_count > 0:
+        counts_norm = counts / max_count
+    else:
+        counts_norm = np.zeros_like(counts)
+    ensure_parent_dir(normalized_histogram_path)
+    np.savetxt(normalized_histogram_path, np.column_stack((bin_centers, counts_norm)), fmt="%.15g", delimiter="\t")
+
+    return histogram_path
+
+
+file_path = maybe_prepare_histogram_input(args, file_path)
+
+
 gamma = 42.58e6  # Hz/T
 
 # --- COLORES ---
@@ -95,6 +177,10 @@ LS_PERCENT = "--"
 # ============================================================
 
 data = np.loadtxt(file_path, comments='%')
+if data.ndim == 1:
+    data = data.reshape(1, -1)
+if data.shape[1] < 2:
+    raise ValueError(f"El archivo BFOV debe tener al menos 2 columnas [B_mT, hist]: {file_path}")
 B_mT, hist = data[:,0], data[:,1]
 hist_norm = hist / np.max(hist)
 
