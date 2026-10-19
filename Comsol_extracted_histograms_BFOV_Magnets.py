@@ -54,6 +54,7 @@ def parse_args():
     parser.add_argument("--magnets-only", action="store_true", help="Solo ejecutar bloque Magnets")
     parser.add_argument("--no-show", action="store_true", help="No abrir ventanas de plot")
     parser.add_argument("--emit-metrics-json", dest="emit_metrics_json", help="Exporta métricas BFOV en JSON y termina")
+    parser.add_argument("--field-label", dest="field_label", default="By", help="Componente del campo (Bx, By, Bz) para la etiqueta del eje X")
     return parser.parse_args()
 
 
@@ -272,7 +273,7 @@ if args.emit_metrics_json:
 
 fig, ax = plt.subplots(figsize=(8,5))
 ax.plot(B_mT, hist_norm, color="grey")
-ax.set(xlabel="By (mT)", ylabel="Normalized histogram")
+ax.set(xlabel=f"{args.field_label} (mT)", ylabel="Normalized histogram")
 case_title = f"Magnet: {Magnet_info}, FOV: {FOV_info}, Analysis: {Analysis}"
 ax.set_title(
     case_title + "\n" + "BFOV Histogram (Normalized)",

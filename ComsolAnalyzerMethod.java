@@ -10,6 +10,8 @@
 // - Dialogos: javax.swing.JOptionPane con paneles Swing como contenido.
 // - Si COMSOL bloquea javax.swing / java.io / ProcessBuilder, revisa
 //   Preferences > Security (permisos de Methods y acceso a ficheros).
+//   Si se bloquea el lanzamiento de Python, el postproceso se omite y los
+//   comandos se guardan en run_python_postprocess.bat dentro de la carpeta de salida.
 // - Solo sintaxis Java 8.
 // =============================================================================
 
@@ -24,8 +26,21 @@ class Sel {
     public String toString() { return label + "   [" + tag + "]"; }
 }
 
+// Valores de un Parametric Sweep: cada combinacion corresponde a una "outer solution" (mismo orden)
+class SweepInfo {
+    String study = ""; String solTag = ""; boolean viaParent = false; boolean hasUnits = false;
+    String[] names = new String[0];
+    java.util.List<double[]> combos = new java.util.ArrayList<double[]>();
+    java.util.List<String> labels = new java.util.ArrayList<String>();   // "mu_trans = 1.05"
+    java.util.List<String> suffixes = new java.util.ArrayList<String>(); // "mu_trans_1.05"
+
+    int count() { return combos.size(); }
+}
+
 class Ds {
     String tag; String label; String shortLabel;
+    // Parametric Sweep: valor del barrido tratado como estudio independiente (sweepIdx 1-based, 0 = sin barrido)
+    String srcTag = ""; int sweepIdx = 0; String folderName = ""; SweepInfo sweep = null;
     public String toString() { return tag + ": " + label; }
 }
 
@@ -51,7 +66,7 @@ class MagCfg {
 
 class Opts {
     String outDir = ""; String modelName = ""; String fovInfo = "";
-    String scriptDir = ""; boolean runPython = true;
+    String scriptDir = ""; boolean runPython = true; String field = "By";
     boolean bfov3d = true; boolean bfovHist = true; boolean bfovCoord = false;
     boolean changeFov = false; boolean magnets3d = false; boolean magnetsHist = false;
     boolean changeOrtho = false;
@@ -120,6 +135,71 @@ class Util {
     }
 
     String fmt(double v) { return String.valueOf(v); }
+
+    // Valor numerico compacto para nombres y etiquetas (1.05, 0.5, 100)
+    String numTok(double v) {
+        if (v == 0) return "0";
+        try { return java.math.BigDecimal.valueOf(v).round(new java.math.MathContext(8)).stripTrailingZeros().toPlainString(); }
+        catch (Throwable t) { return String.valueOf(v); }
+    }
+
+    // Como safeName pero conserva '.' y '-' (para valores de parametros en nombres de carpeta)
+    String fsName(String s) {
+        if (s == null || s.isEmpty()) return "";
+        return s.replaceAll("[^a-zA-Z0-9_.\\-]", "_").replaceAll("[. ]+$", "");
+    }
+
+    // Carpeta del .mph actual ("" si el modelo no se ha guardado en disco)
+    String modelDir() {
+        try {
+            String p = str(call(model, "getFilePath"));
+            if (p.isEmpty()) return "";
+            java.io.File d = new java.io.File(p).getAbsoluteFile().getParentFile();
+            return d != null && d.isDirectory() ? d.getPath() : "";
+        } catch (Throwable t) { return ""; }
+    }
+
+    // Llamada por reflexion a metodos de la API de COMSOL cuya firma no esta garantizada; null si falla
+    String lastErr = "";
+
+    Object call(Object target, String name, Object... args) {
+        lastErr = "";
+        if (target == null) { lastErr = "objeto nulo"; return null; }
+        lastErr = "metodo no encontrado: " + name;
+        java.lang.reflect.Method[] ms = target.getClass().getMethods();
+        for (int i = 0; i < ms.length; i++) {
+            if (!ms[i].getName().equals(name) || ms[i].getParameterTypes().length != args.length) continue;
+            try { ms[i].setAccessible(true); } catch (Throwable t) { }
+            try {
+                Object r = ms[i].invoke(target, args);
+                lastErr = "";
+                return r;
+            } catch (Throwable t) {
+                Throwable c = t instanceof java.lang.reflect.InvocationTargetException && t.getCause() != null ? t.getCause() : t;
+                lastErr = String.valueOf(c.getMessage());
+            }
+        }
+        return null;
+    }
+
+    String str(Object o) { return o == null ? "" : String.valueOf(o).trim(); }
+
+    String[] strArr(Object o) {
+        if (o instanceof String[]) return (String[]) o;
+        return null;
+    }
+
+    void flatten(Object o, java.util.List<Double> out) {
+        if (o instanceof double[]) {
+            double[] a = (double[]) o;
+            for (int i = 0; i < a.length; i++) out.add(Double.valueOf(a[i]));
+        } else if (o instanceof Object[]) {
+            Object[] a = (Object[]) o;
+            for (int i = 0; i < a.length; i++) flatten(a[i], out);
+        } else if (o instanceof Number) {
+            out.add(Double.valueOf(((Number) o).doubleValue()));
+        }
+    }
 
     boolean has(String[] arr, String t) {
         if (arr == null) return false;
@@ -222,15 +302,15 @@ class Util {
         } catch (Throwable t) { }
     }
 
-    // <outDir>/Simulation_results/<safe(label)> con fallback al tag
-    String createOutputFolder(String outDir, String label, String tag) throws Exception {
+    // <outDir>/Simulation_results/<dirName> con fallback al tag
+    String createOutputFolder(String outDir, String dirName, String tag) throws Exception {
         java.io.File root = new java.io.File(outDir, "Simulation_results");
         if (!root.isDirectory() && !root.mkdirs()) throw new Exception("No se pudo crear " + root);
-        java.io.File f = new java.io.File(root, safeName(label));
-        if (f.isDirectory() || f.mkdirs()) return f.getPath();
+        java.io.File f = new java.io.File(root, dirName);
+        if (!dirName.isEmpty() && (f.isDirectory() || f.mkdirs())) return f.getPath();
         f = new java.io.File(root, safeName(tag));
         if (f.isDirectory() || f.mkdirs()) return f.getPath();
-        throw new Exception("No se pudo crear la carpeta de salida para " + label + " / " + tag);
+        throw new Exception("No se pudo crear la carpeta de salida para " + dirName + " / " + tag);
     }
 
     String checkWritable(String outDir) {
@@ -356,7 +436,11 @@ class Ui {
         javax.swing.JOptionPane pane = new javax.swing.JOptionPane(content, msgType, optType, null, options,
             options == null ? null : options[0]);
         javax.swing.JDialog d = pane.createDialog(null, title);
-        d.setAlwaysOnTop(true);
+        try {
+            d.setAlwaysOnTop(true);
+        } catch (SecurityException ex) {
+            // El sandbox de COMSOL no concede AWTPermission setWindowAlwaysOnTop; se sigue sin esa opcion
+        }
         d.setResizable(true);
         d.setVisible(true);
         d.dispose();
@@ -423,25 +507,121 @@ class Ui {
         return s;
     }
 
+    // Navegador propio: JFileChooser lee "user.dir" (y usa ShellFolder), lo que el sandbox de COMSOL deniega.
+    // Solo se usan rutas absolutas y java.io.File.
+    class Nav {
+        java.io.File cur;
+        boolean dirOnly;
+        javax.swing.DefaultListModel<java.io.File> model = new javax.swing.DefaultListModel<java.io.File>();
+        javax.swing.JTextField path = new javax.swing.JTextField(40);
+
+        void go(java.io.File f) {
+            model.clear();
+            cur = f;
+            path.setText(f == null ? "" : f.getPath());
+            java.io.File[] items;
+            try {
+                items = f == null ? java.io.File.listRoots() : f.listFiles();
+            } catch (SecurityException ex) {
+                items = null;
+            }
+            if (items == null) return;
+            java.util.Arrays.sort(items, new java.util.Comparator<java.io.File>() {
+                public int compare(java.io.File a, java.io.File b) {
+                    boolean da = a.isDirectory(), db = b.isDirectory();
+                    if (da != db) return da ? -1 : 1;
+                    return a.getName().compareToIgnoreCase(b.getName());
+                }
+            });
+            for (java.io.File it : items) {
+                if (f == null || it.isDirectory() || (!dirOnly && it.getName().toLowerCase().endsWith(".txt"))) model.addElement(it);
+            }
+        }
+    }
+
+    // Devuelve la ruta elegida o null si se cancela
+    String browse(String title, String start, boolean dirOnly) {
+        final Nav nav = new Nav();
+        nav.dirOnly = dirOnly;
+        java.io.File init = null;
+        try {
+            if (start != null && !start.trim().isEmpty()) {
+                java.io.File s = new java.io.File(start.trim());
+                if (s.isAbsolute()) {
+                    if (!dirOnly || !s.isDirectory()) s = s.getParentFile();
+                    while (s != null && !s.isDirectory()) s = s.getParentFile();
+                    init = s;
+                }
+            }
+        } catch (SecurityException ex) {
+            init = null;
+        }
+        nav.go(init);
+
+        final javax.swing.JList<java.io.File> list = new javax.swing.JList<java.io.File>(nav.model);
+        list.setSelectionMode(javax.swing.ListSelectionModel.SINGLE_SELECTION);
+        list.setCellRenderer(new javax.swing.DefaultListCellRenderer() {
+            public java.awt.Component getListCellRendererComponent(javax.swing.JList<?> l, Object v, int i, boolean sel, boolean foc) {
+                java.io.File f = (java.io.File) v;
+                String n = f.getName().isEmpty() ? f.getPath() : f.getName();
+                return super.getListCellRendererComponent(l, f.isDirectory() ? "[" + n + "]" : n, i, sel, foc);
+            }
+        });
+        list.addMouseListener(new java.awt.event.MouseAdapter() {
+            public void mouseClicked(java.awt.event.MouseEvent e) {
+                if (e.getClickCount() == 2) {
+                    java.io.File f = list.getSelectedValue();
+                    if (f != null && f.isDirectory()) nav.go(f);
+                }
+            }
+        });
+        nav.path.addActionListener(new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent e) {
+                java.io.File f = new java.io.File(nav.path.getText().trim());
+                if (f.isAbsolute() && f.isDirectory()) nav.go(f);
+            }
+        });
+        javax.swing.JButton up = new javax.swing.JButton("Up");
+        up.addActionListener(new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent e) {
+                nav.go(nav.cur == null ? null : nav.cur.getParentFile());
+            }
+        });
+        javax.swing.JButton roots = new javax.swing.JButton("Drives");
+        roots.addActionListener(new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent e) { nav.go(null); }
+        });
+
+        javax.swing.JPanel top = new javax.swing.JPanel(new java.awt.BorderLayout(4, 0));
+        javax.swing.JPanel btns = new javax.swing.JPanel(new java.awt.GridLayout(1, 2, 4, 0));
+        btns.add(up);
+        btns.add(roots);
+        top.add(btns, java.awt.BorderLayout.WEST);
+        top.add(nav.path, java.awt.BorderLayout.CENTER);
+
+        javax.swing.JPanel p = new javax.swing.JPanel(new java.awt.BorderLayout(0, 4));
+        p.add(top, java.awt.BorderLayout.NORTH);
+        p.add(scroll(list, 520, 280), java.awt.BorderLayout.CENTER);
+        p.add(new javax.swing.JLabel(dirOnly
+            ? "Doble clic para entrar; OK elige la carpeta seleccionada (o la actual)."
+            : "Doble clic para entrar; seleccione un archivo y pulse OK."), java.awt.BorderLayout.SOUTH);
+
+        if (!ok(title, p)) return null;
+        java.io.File sel = list.getSelectedValue();
+        if (dirOnly) {
+            if (sel != null && sel.isDirectory()) return sel.getAbsolutePath();
+            return nav.cur == null ? null : nav.cur.getAbsolutePath();
+        }
+        return sel != null && sel.isFile() ? sel.getAbsolutePath() : null;
+    }
+
     String chooseDir(String start) {
-        javax.swing.JFileChooser fc = new javax.swing.JFileChooser();
-        if (start != null && !start.isEmpty() && new java.io.File(start).isDirectory()) fc.setCurrentDirectory(new java.io.File(start));
-        fc.setFileSelectionMode(javax.swing.JFileChooser.DIRECTORIES_ONLY);
-        if (fc.showOpenDialog(null) != javax.swing.JFileChooser.APPROVE_OPTION) return null;
-        return fc.getSelectedFile().getAbsolutePath();
+        return browse("Seleccionar carpeta", start, true);
     }
 
     String chooseFile(String start) {
-        javax.swing.JFileChooser fc = new javax.swing.JFileChooser();
-        if (start != null && !start.isEmpty()) {
-            java.io.File d = new java.io.File(start).getParentFile();
-            if (d != null && d.isDirectory()) fc.setCurrentDirectory(d);
-        }
-        fc.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("Text files (*.txt)", "txt"));
-        if (fc.showOpenDialog(null) != javax.swing.JFileChooser.APPROVE_OPTION) return null;
-        return fc.getSelectedFile().getAbsolutePath();
+        return browse("Seleccionar archivo", start, false);
     }
-
     javax.swing.JPanel browseRow(String label, final javax.swing.JTextField tf, final boolean dirOnly) {
         javax.swing.JPanel inner = new javax.swing.JPanel(new java.awt.BorderLayout(4, 0));
         inner.add(tf, java.awt.BorderLayout.CENTER);
@@ -462,6 +642,8 @@ class Ui {
         list.setSelectionMode(javax.swing.ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
 
         javax.swing.JTextField tfOut = new javax.swing.JTextField(o.outDir, 32);
+        javax.swing.JComboBox<String> cbField = new javax.swing.JComboBox<String>(new String[] {"Bx", "By", "Bz"});
+        cbField.setSelectedItem(o.field);
         javax.swing.JTextField tfModel = new javax.swing.JTextField(o.modelName, 32);
         javax.swing.JTextField tfFov = new javax.swing.JTextField(o.fovInfo, 32);
         javax.swing.JTextField tfPy = new javax.swing.JTextField(o.scriptDir, 32);
@@ -476,6 +658,8 @@ class Ui {
         javax.swing.JCheckBox cMh = check("Magnets Histogram", o.magnetsHist);
 
         javax.swing.JPanel p = column();
+        p.add(row("Field component:", cbField));
+        p.add(javax.swing.Box.createVerticalStrut(6));
         p.add(title("Datasets disponibles (multi-seleccion):"));
         p.add(scroll(list, 520, 130));
         p.add(browseRow("Output dir:", tfOut, true));
@@ -499,6 +683,7 @@ class Ui {
             if (!w.isEmpty()) { error("Output dir", w); continue; }
             selected.addAll(sel);
             o.outDir = out;
+            o.field = String.valueOf(cbField.getSelectedItem());
             o.modelName = u.safeName(tfModel.getText().trim());
             o.fovInfo = tfFov.getText().trim().isEmpty() ? "N/A" : tfFov.getText().trim();
             o.scriptDir = tfPy.getText().trim();
@@ -507,6 +692,41 @@ class Ui {
             o.bfovCoord = cCoord.isSelected(); o.changeFov = cFov.isSelected();
             o.magnets3d = cM3d.isSelected(); o.magnetsHist = cMh.isSelected();
             return true;
+        }
+    }
+
+    // ---- Parametric Sweep: valores del barrido a analizar (null si se cancela) ----
+    java.util.List<Integer> askSweep(Ds ds, SweepInfo si) {
+        String[] items = new String[si.count()];
+        for (int i = 0; i < items.length; i++) items[i] = (i + 1) + ":  " + si.labels.get(i);
+        final javax.swing.JList<String> list = new javax.swing.JList<String>(items);
+        list.setSelectionMode(javax.swing.ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+        list.setSelectionInterval(0, items.length - 1);
+        final int n = items.length;
+        javax.swing.JButton bAll = new javax.swing.JButton("Seleccionar todo");
+        bAll.addActionListener(new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent e) { list.setSelectionInterval(0, n - 1); }
+        });
+        javax.swing.JButton bNone = new javax.swing.JButton("Limpiar");
+        bNone.addActionListener(new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent e) { list.clearSelection(); }
+        });
+        javax.swing.JPanel btns = new javax.swing.JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 4, 0));
+        btns.add(bAll); btns.add(bNone);
+        btns.setAlignmentX(java.awt.Component.LEFT_ALIGNMENT);
+
+        javax.swing.JPanel p = column();
+        p.add(title("Parametric Sweep en \"" + ds.shortLabel + "\" [" + ds.tag + "]"));
+        p.add(new javax.swing.JLabel("Selecciona los valores a analizar (cada uno se procesa como un estudio independiente):"));
+        p.add(scroll(list, 460, 240));
+        p.add(btns);
+        while (true) {
+            if (!ok("Parametric Sweep", p)) return null;
+            int[] idx = list.getSelectedIndices();
+            if (idx.length == 0) { error("Seleccion requerida", "Selecciona al menos un valor del barrido."); continue; }
+            java.util.List<Integer> out = new java.util.ArrayList<Integer>();
+            for (int i = 0; i < idx.length; i++) out.add(Integer.valueOf(idx[i]));
+            return out;
         }
     }
 
@@ -754,15 +974,70 @@ class Exporter {
     void rmPlot(String tag) { try { model.result().remove(tag); } catch (Throwable t) { } }
     void rmDataset(String tag) { try { model.result().dataset().remove(tag); } catch (Throwable t) { } }
 
+    // Valor del Parametric Sweep (1-based) a aplicar via "looplevel" en plots/exports; 0 = sin seleccion
+    int loop = 0;
+
+    String propList(Object target) {
+        String[] props = u.strArr(u.call(target, "properties"));
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; props != null && i < props.length; i++) sb.append(i > 0 ? "," : "").append(props[i]);
+        return sb.toString();
+    }
+
+    // Prueba varias formas de fijar looplevel; "" si alguna funciona, si no el detalle de los fallos
+    String setLoop(Object target) {
+        StringBuilder err = new StringBuilder();
+        u.call(target, "setIndex", "looplevelinput", "manual", Integer.valueOf(0));
+        if (u.lastErr.isEmpty()) {
+            u.call(target, "setIndex", "looplevel", String.valueOf(loop), Integer.valueOf(0));
+            if (u.lastErr.isEmpty()) return "";
+            u.call(target, "setIndex", "looplevel", Integer.valueOf(loop), Integer.valueOf(0));
+            if (u.lastErr.isEmpty()) return "";
+            err.append("setIndex(looplevel): ").append(u.lastErr).append(" | ");
+        } else err.append("setIndex(looplevelinput): ").append(u.lastErr).append(" | ");
+        u.call(target, "set", "looplevelinput", new String[] {"manual"});
+        if (u.lastErr.isEmpty()) {
+            u.call(target, "set", "looplevel", new int[] {loop});
+            if (u.lastErr.isEmpty()) return "";
+            err.append("set(looplevel): ").append(u.lastErr).append(" | ");
+        } else err.append("set(looplevelinput): ").append(u.lastErr).append(" | ");
+        u.call(target, "set", "looplevel", new int[] {loop});
+        if (u.lastErr.isEmpty()) return "";
+        err.append("set(looplevel sin input): ").append(u.lastErr);
+        return err.toString();
+    }
+
+    void loopPlot(String tag) throws Exception {
+        if (loop <= 0) return;
+        try { model.result(tag).run(); } catch (Throwable t) { }
+        String e = setLoop(model.result(tag));
+        if (!e.isEmpty())
+            throw new Exception("No se pudo fijar looplevel=" + loop + " en el plot " + tag + ": " + e
+                + ". Propiedades del plot: " + propList(model.result(tag)));
+    }
+
+    void loopExport(String tag) throws Exception {
+        if (loop <= 0) return;
+        String e = setLoop(model.result().export(tag));
+        if (!e.isEmpty())
+            throw new Exception("No se pudo fijar looplevel=" + loop + " en el export " + tag + ": " + e
+                + ". Propiedades del export: " + propList(model.result().export(tag)));
+    }
+
     void ensureView2() {
         try { model.component("comp1").view("view2"); }
         catch (Throwable t) { model.component("comp1").view().create("view2", "geom1"); }
     }
 
-    void configureImage(String tag, String lockview) {
+    // Zoom to extents de la vista (la API puede no exponerlo; el export con "zoomextents" actua como respaldo)
+    void fitView(String viewTag) {
+        try { u.call(model.component("comp1").view(viewTag).camera(), "zoomExtents"); } catch (Throwable t) { }
+    }
+
+    void configureImage(String tag, String lockview, boolean fit) {
         String[][] kv = {
             {"size", "current"}, {"unit", "px"}, {"height", "600"}, {"width", "800"}, {"lockratio", "off"},
-            {"resolution", "96"}, {"antialias", "on"}, {"zoomextents", "off"}, {"fontsize", "12"},
+            {"resolution", "96"}, {"antialias", "on"}, {"zoomextents", fit ? "on" : "off"}, {"fontsize", "12"},
             {"colortheme", "globaltheme"}, {"background", "color"}, {"gltfincludelines", "on"},
             {"title1d", "on"}, {"legend1d", "on"}, {"logo1d", "on"}, {"options1d", "on"},
             {"title2d", "on"}, {"legend2d", "on"}, {"logo2d", "on"}, {"options2d", "off"},
@@ -775,13 +1050,18 @@ class Exporter {
         model.result().export(tag).set("customcolor", new int[] {1, 1, 1});
     }
 
-    // PNG nativo de COMSOL a ruta temporal corta y movido al destino final
-    void exportPng(String pgTag, String imgTag, String pngOut) throws Exception {
+    // PNG nativo de COMSOL a ruta temporal corta y movido al destino final.
+    // fit3d: encuadra la vista 3D (zoom to extents) justo antes de renderizar
+    void exportPng(String pgTag, String imgTag, String pngOut, boolean fit3d) throws Exception {
         java.io.File tmp = u.tempFile("png", imgTag);
         try {
             rmExport(imgTag);
             model.result().export().create(imgTag, pgTag, "Image");
-            configureImage(imgTag, "off");
+            configureImage(imgTag, "off", fit3d);
+            if (fit3d) {
+                try { model.result(pgTag).run(); } catch (Throwable t) { }
+                fitView("view1");
+            }
             model.result().export(imgTag).set("pngfilename", tmp.getPath());
             model.result().export(imgTag).run();
             rmExport(imgTag);
@@ -812,11 +1092,13 @@ class Exporter {
         } finally { tmp.delete(); }
     }
 
+    // scale <= 0: encuadre automatico (zoom to extents); scale > 0: orthoscale manual
     void camera(String projection, double[] pos, double[] up, double scale) {
         model.component("comp1").view("view2").camera().set("projection", projection);
         model.component("comp1").view("view2").camera().set("position", pos);
         model.component("comp1").view("view2").camera().set("up", up);
-        model.component("comp1").view("view2").camera().set("orthoscale", scale);
+        if (scale > 0) model.component("comp1").view("view2").camera().set("orthoscale", scale);
+        else fitView("view2");
     }
 
     // Vistas ortograficas XY / YZ / XZ del PlotGroup3D
@@ -827,26 +1109,31 @@ class Exporter {
         try { model.result(pg3d).set("view", "view2"); } catch (Throwable t) { }
         rmExport(imgTag);
         model.result().export().create(imgTag, pg3d, "Image");
-        configureImage(imgTag, "on");
+        configureImage(imgTag, "on", scale <= 0);
         try { model.result().export(imgTag).set("view", "view2"); } catch (Throwable t) { }
         try {
             camera("orthographic", new double[] {0, 0, 1}, new double[] {0, 1, 0}, scale);
             try { model.result(pg3d).run(); } catch (Throwable t) { }
+            if (scale <= 0) fitView("view2");
             orthoExport(imgTag, paths[0], dsTag + "_xy");
 
             camera("orthographic", new double[] {1, 0, 0}, new double[] {0, 0, 1}, scale);
             try { model.result(pg3d).run(); } catch (Throwable t) { }
+            if (scale <= 0) fitView("view2");
             orthoExport(imgTag, paths[1], dsTag + "_yz");
 
             camera("orthographic", new double[] {0, 1, 0}, new double[] {0, 0, 1}, scale);
             try { model.result(pg3d).run(); } catch (Throwable t) { }
+            if (scale <= 0) fitView("view2");
             orthoExport(imgTag, paths[2], dsTag + "_xz");
         } finally { rmExport(imgTag); }
     }
 
-    // B_FOV (o dominio elegido): PNG 3D + proyecciones + TXT 3D + TXT histograma (mfnc.By en mT)
+    // B_FOV (o dominio elegido): PNG 3D + proyecciones + TXT 3D + TXT histograma (componente "field" en mT).
+    // ortho <= 0: proyecciones con encuadre automatico
     void exportDataset(String dsTag, String histTxt, String pngPath, String selTagIn, String selLabel,
-                       int histBins, double ortho) throws Exception {
+                       int histBins, double ortho, String field) throws Exception {
+        String expr = "mfnc." + field;
         String newDs = "dset_fov_" + dsTag, ds3d = "dset_fov3d_" + dsTag, pg3d = "pg3d_" + dsTag;
         String img = "img_" + dsTag, plot3d = "plot3d_" + dsTag, pg1d = "pg1d_" + dsTag, plotHist = "plothist_" + dsTag;
         try {
@@ -876,9 +1163,10 @@ class Exporter {
             if (selLabel != null && !selLabel.isEmpty()) model.result(pg3d).label(selLabel);
             try { model.result(pg3d).run(); } catch (Throwable t) { }
             model.result(pg3d).set("data", ds3d);
+            loopPlot(pg3d);
             model.result(pg3d).create("vol1", "Volume");
             model.result(pg3d).feature("vol1").set("evaluationsettings", "parent");
-            model.result(pg3d).feature("vol1").set("expr", "mfnc.By");
+            model.result(pg3d).feature("vol1").set("expr", expr);
             model.result(pg3d).feature("vol1").set("unit", "mT");
             model.result(pg3d).feature("vol1").set("colortable", "Inferno");
             model.result(pg3d).run();
@@ -890,7 +1178,7 @@ class Exporter {
             } catch (Throwable t) { }
 
             u.ensureParent(pngPath);
-            exportPng(pg3d, img, pngPath);
+            exportPng(pg3d, img, pngPath, true);
             try { orthographicViews(pg3d, img, pngPath, dsTag, ortho); }
             catch (Throwable t) { lg.log("WARN", dsTag, "Proyecciones ortograficas no exportadas: " + t.getMessage()); }
 
@@ -904,11 +1192,12 @@ class Exporter {
             model.result().create(pg1d, "PlotGroup1D");
             model.result(pg1d).run();
             model.result(pg1d).set("data", newDs);
+            loopPlot(pg1d);
             model.result(pg1d).create("hist1", "Histogram");
             model.result(pg1d).feature("hist1").set("markerpos", "datapoints");
             model.result(pg1d).feature("hist1").set("linewidth", "preference");
             model.result(pg1d).feature("hist1").set("evaluationsettings", "parent");
-            model.result(pg1d).feature("hist1").set("expr", "mfnc.By");
+            model.result(pg1d).feature("hist1").set("expr", expr);
             model.result(pg1d).feature("hist1").set("unit", "mT");
             model.result(pg1d).feature("hist1").set("number", histBins);
             model.result(pg1d).feature("hist1").set("function", "discrete");
@@ -946,6 +1235,7 @@ class Exporter {
             model.result().create(pg3d, "PlotGroup3D");
             try { model.result(pg3d).run(); } catch (Throwable t) { }
             model.result(pg3d).set("data", newDs);
+            loopPlot(pg3d);
             model.result(pg3d).set("titletype", "manual");
             model.result(pg3d).set("title", "M (T)");
             model.result(pg3d).create("vol1", "Volume");
@@ -959,8 +1249,8 @@ class Exporter {
             model.result(pg3d).run();
 
             u.ensureParent(pngPath);
-            exportPng(pg3d, img, pngPath);
-            try { orthographicViews(pg3d, img, pngPath, dsTag, 0.35); }
+            exportPng(pg3d, img, pngPath, true);
+            try { orthographicViews(pg3d, img, pngPath, dsTag, -1); }
             catch (Throwable t) { lg.log("WARN", dsTag, "Proyecciones ortograficas Magnets no exportadas: " + t.getMessage()); }
 
             u.ensureParent(txtPath);
@@ -991,6 +1281,7 @@ class Exporter {
             model.result().create(pg1d, "PlotGroup1D");
             try { model.result(pg1d).run(); } catch (Throwable t) { }
             model.result(pg1d).set("data", newDs);
+            loopPlot(pg1d);
             model.result(pg1d).create("hist1", "Histogram");
             model.result(pg1d).feature("hist1").set("markerpos", "datapoints");
             model.result(pg1d).feature("hist1").set("linewidth", "preference");
@@ -1006,7 +1297,7 @@ class Exporter {
             model.result().export(plotHist).run();
 
             // PNG opcional: el postproceso Python lo sobrescribe con la version final
-            try { exportPng(pg1d, imgTag, pngPath); }
+            try { exportPng(pg1d, imgTag, pngPath, false); }
             catch (Throwable t) { lg.log("WARN", dsTag, "PNG nativo del histograma no exportado: " + t.getMessage()); }
         } catch (Exception ex) {
             throw new Exception("Error al exportar histograma Magnets para \"" + dsTag + "\": " + ex.getMessage(), ex);
@@ -1045,6 +1336,7 @@ class Exporter {
             }
             model.result().export().create(exportTag, "Data");
             model.result().export(exportTag).set("data", working);
+            loopExport(exportTag);
             model.result().export(exportTag).set("location", "file");
             model.result().export(exportTag).set("coordfilename", coordFile.getPath());
             model.result().export(exportTag).set("expr", new String[] {"mfnc.Bx", "mfnc.By", "mfnc.Bz", "mfnc.normB"});
@@ -1080,31 +1372,361 @@ class Exporter {
         }
 
         model.result().export().create("img6", "Image");
-        configureImage("img6", "off");
+        configureImage("img6", "off", true);
         model.result().export("img6").set("sourcetype", "geometry");
         model.result().export("img6").set("sourceobject", "geom1");
         model.result().export("img6").set("view", "view2");
         model.component("comp1").view("view2").camera().set("projection", "orthographic");
 
         model.component("comp1").view("view2").camera().set("orthoscale", 1.2);
+        fitView("view2");
         model.result().export("img6").set("pngfilename", new java.io.File(root, "Geometry_3D.png").getPath());
         model.result().export("img6").run();
 
         model.component("comp1").view("view2").camera().set("up", new double[] {0, 1, 0});
         model.component("comp1").view("view2").camera().set("position", new double[] {0, 0, 1});
         model.component("comp1").view("view2").camera().set("orthoscale", 1.2);
+        fitView("view2");
         model.result().export("img6").set("pngfilename", new java.io.File(root, "Geometry_XY.png").getPath());
         model.result().export("img6").run();
 
         model.component("comp1").view("view2").camera().set("position", new double[] {1, 0, 0});
         model.component("comp1").view("view2").camera().set("up", new double[] {0, 0, 1});
         model.component("comp1").view("view2").camera().set("orthoscale", 1.2);
+        fitView("view2");
         model.result().export("img6").set("pngfilename", new java.io.File(root, "Geometry_YZ.png").getPath());
         model.result().export("img6").run();
     }
 }
 
 final Exporter exp = new Exporter();
+
+// ----------------------------------------------------------------------------
+// Parametric Sweep: deteccion, seleccion de valores y dataset temporal por valor
+// ----------------------------------------------------------------------------
+class Sweeper {
+    // Solution dataset que alimenta al dataset (sigue la cadena "data" de los datasets derivados)
+    String[] solutionOf(String dsTag) {
+        String t = dsTag;
+        for (int depth = 0; depth < 6 && !t.isEmpty() && u.datasetExists(t); depth++) {
+            Object d = model.result().dataset(t);
+            String s = u.str(u.call(d, "getString", "solution"));
+            if (!s.isEmpty() && !s.equalsIgnoreCase("none")) return new String[] {s, depth > 0 ? "1" : "0"};
+            String parent = u.str(u.call(d, "getString", "data"));
+            if (parent.isEmpty() || parent.equalsIgnoreCase("none") || parent.equals(t)) break;
+            t = parent;
+        }
+        return null;
+    }
+
+    // Estudio de la solucion; si no se puede leer, se busca por label (= shortLabel del dataset)
+    String studyOf(String sol, String label) {
+        String[] studies = model.study().tags();
+        String std = u.str(u.call(model.sol(sol), "study"));
+        if (!std.isEmpty() && u.has(studies, std)) return std;
+        for (int i = 0; i < studies.length; i++) {
+            if (model.study(studies[i]).label().trim().equalsIgnoreCase(label)) return studies[i];
+        }
+        return "";
+    }
+
+    String paramFeature(String std) {
+        String[] ft = model.study(std).feature().tags();
+        for (int i = 0; i < ft.length; i++) {
+            String type = u.str(u.call(model.study(std).feature(ft[i]), "featureType"));
+            if (type.equalsIgnoreCase("Parametric") || (type.isEmpty() && ft[i].startsWith("param"))) return ft[i];
+        }
+        return "";
+    }
+
+    // "1 1.05 range(1.1,0.05,1.3)" -> lista de valores; null si no es interpretable (unidades [..] ignoradas)
+    java.util.List<Double> parseList(String expr) {
+        if (expr == null) return null;
+        String s = expr.replaceAll("\\[[^\\]]*\\]", "").trim();
+        java.util.List<String> toks = new java.util.ArrayList<String>();
+        StringBuilder cur = new StringBuilder();
+        int depth = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '(') depth++; else if (c == ')') depth--;
+            if (depth == 0 && (Character.isWhitespace(c) || c == ',')) {
+                if (cur.length() > 0) { toks.add(cur.toString()); cur.setLength(0); }
+            } else cur.append(c);
+        }
+        if (cur.length() > 0) toks.add(cur.toString());
+
+        java.util.List<Double> out = new java.util.ArrayList<Double>();
+        for (int i = 0; i < toks.size(); i++) {
+            String tok = toks.get(i);
+            if (tok.startsWith("range(") && tok.endsWith(")")) {
+                String[] a = tok.substring(6, tok.length() - 1).split(",");
+                if (a.length < 2 || a.length > 3) return null;
+                Double lo = u.num(a[0]), st = a.length == 3 ? u.num(a[1]) : Double.valueOf(1), hi = u.num(a[a.length - 1]);
+                if (lo == null || st == null || hi == null || st.doubleValue() == 0) return null;
+                int n = (int) Math.floor((hi.doubleValue() - lo.doubleValue()) / st.doubleValue() + 1e-9) + 1;
+                if (n < 1 || n > 100000) return null;
+                for (int k = 0; k < n; k++) out.add(Double.valueOf(lo.doubleValue() + k * st.doubleValue()));
+            } else {
+                Double v = u.num(tok);
+                if (v == null) return null;
+                out.add(v);
+            }
+        }
+        return out;
+    }
+
+    // Respaldo cuando la lista del estudio no es numerica: valores reales de las outer solutions (un parametro)
+    java.util.List<Double> pvals(String sol) {
+        java.util.List<Double> out = new java.util.ArrayList<Double>();
+        u.flatten(u.call(model.sol(sol), "getPVals"), out);
+        return out.isEmpty() ? null : out;
+    }
+
+    // null si el dataset no depende de un Parametric Sweep con mas de un valor
+    SweepInfo detect(Ds ds) {
+        try {
+            String[] so = solutionOf(ds.tag);
+            if (so == null) return null;
+            String std = studyOf(so[0], ds.shortLabel);
+            if (std.isEmpty()) return null;
+            String feat = paramFeature(std);
+            if (feat.isEmpty()) return null;
+            Object f = model.study(std).feature(feat);
+            String[] names = u.strArr(u.call(f, "getStringArray", "pname"));
+            String[] lists = u.strArr(u.call(f, "getStringArray", "plistarr"));
+            if (names == null || names.length == 0) return null;
+
+            SweepInfo si = new SweepInfo();
+            si.study = std; si.solTag = so[0]; si.viaParent = "1".equals(so[1]); si.names = names;
+            java.util.List<java.util.List<Double>> vals = new java.util.ArrayList<java.util.List<Double>>();
+            boolean parsed = lists != null && lists.length >= names.length;
+            for (int k = 0; parsed && k < names.length; k++) {
+                java.util.List<Double> v = parseList(lists[k]);
+                if (v == null || v.isEmpty()) parsed = false; else vals.add(v);
+                if (lists[k].indexOf('[') >= 0) si.hasUnits = true;
+            }
+            if (!parsed) {
+                vals.clear(); si.hasUnits = false;
+                java.util.List<Double> pv = names.length == 1 ? pvals(so[0]) : null;
+                if (pv == null) {
+                    lg.log("WARN", ds.tag, "Parametric Sweep detectado en " + std + " pero no se pudieron leer sus valores; se procesa el dataset completo.");
+                    return null;
+                }
+                vals.add(pv);
+            }
+
+            int m = names.length;
+            if (m == 1) {
+                for (int i = 0; i < vals.get(0).size(); i++) si.combos.add(new double[] {vals.get(0).get(i).doubleValue()});
+            } else if (u.str(u.call(f, "getString", "sweeptype")).equalsIgnoreCase("sparse")) {
+                int n = vals.get(0).size();
+                for (int k = 1; k < m; k++) if (vals.get(k).size() != n) return null;
+                for (int i = 0; i < n; i++) {
+                    double[] c = new double[m];
+                    for (int k = 0; k < m; k++) c[k] = vals.get(k).get(i).doubleValue();
+                    si.combos.add(c);
+                }
+            } else {
+                // All combinations: el primer parametro es el bucle externo
+                int total = 1;
+                for (int k = 0; k < m; k++) total *= vals.get(k).size();
+                for (int i = 0; i < total; i++) {
+                    double[] c = new double[m];
+                    int rem = i;
+                    for (int k = m - 1; k >= 0; k--) {
+                        int sz = vals.get(k).size();
+                        c[k] = vals.get(k).get(rem % sz).doubleValue();
+                        rem /= sz;
+                    }
+                    si.combos.add(c);
+                }
+            }
+            if (si.count() < 2) return null;
+            for (int i = 0; i < si.count(); i++) {
+                StringBuilder lb = new StringBuilder(), sf = new StringBuilder();
+                for (int k = 0; k < m; k++) {
+                    if (k > 0) { lb.append(", "); sf.append("_"); }
+                    String tok = u.numTok(si.combos.get(i)[k]);
+                    lb.append(names[k]).append(" = ").append(tok);
+                    sf.append(u.safeName(names[k])).append("_").append(u.fsName(tok));
+                }
+                si.labels.add(lb.toString());
+                si.suffixes.add(sf.toString());
+            }
+            return si;
+        } catch (Throwable t) {
+            lg.log("WARN", ds.tag, "No se pudo analizar el Parametric Sweep: " + t.getMessage());
+            return null;
+        }
+    }
+
+    // Pide al usuario los valores a analizar y genera un Ds independiente por valor (null si cancela)
+    java.util.List<Ds> resolve(java.util.List<Ds> selected) {
+        java.util.List<Ds> work = new java.util.ArrayList<Ds>();
+        for (int i = 0; i < selected.size(); i++) {
+            Ds ds = selected.get(i);
+            SweepInfo si = detect(ds);
+            if (si == null) { work.add(ds); continue; }
+            lg.log("INFO", ds.tag, "Parametric Sweep detectado en \"" + ds.shortLabel + "\": " + si.count() + " valores.");
+            java.util.List<Integer> pick = ui.askSweep(ds, si);
+            if (pick == null) return null;
+            for (int k = 0; k < pick.size(); k++) {
+                int ix = pick.get(k).intValue();
+                Ds d = new Ds();
+                d.tag = ds.tag; d.srcTag = ds.tag;
+                d.label = ds.label + " [" + si.labels.get(ix) + "]";
+                d.shortLabel = ds.shortLabel + "_" + si.suffixes.get(ix);
+                d.folderName = u.safeName(ds.shortLabel) + "_" + si.suffixes.get(ix);
+                d.sweepIdx = ix + 1; d.sweep = si;
+                work.add(d);
+            }
+        }
+        return work;
+    }
+
+    // Intenta una forma de fijar la outer solution; "" si COMSOL la acepta, si no el mensaje de error
+    String tryStrategy(String tag, int s, int idx, boolean viaParent) {
+        try {
+            if (viaParent) { try { model.result().dataset(tag).set("solutionparams", "manual"); } catch (Throwable t) { } }
+            switch (s) {
+                case 0:
+                    model.result().dataset(tag).set("outersolnum", "manual");
+                    model.result().dataset(tag).set("outersolnumindices", new int[] {idx});
+                    break;
+                case 1:
+                    model.result().dataset(tag).set("outersolnum", String.valueOf(idx));
+                    break;
+                case 2:
+                    model.result().dataset(tag).set("outersolnum", idx);
+                    break;
+                case 3:
+                    u.call(model.result().dataset(tag), "setIndex", "looplevelinput", "manual", Integer.valueOf(0));
+                    if (!u.lastErr.isEmpty()) return u.lastErr;
+                    u.call(model.result().dataset(tag), "setIndex", "looplevel", new int[] {idx}, Integer.valueOf(0));
+                    if (!u.lastErr.isEmpty()) return u.lastErr;
+                    break;
+                case 4:
+                    model.result().dataset(tag).set("solnum", "manual");
+                    model.result().dataset(tag).set("solnumindices", new int[] {idx});
+                    break;
+                default:
+                    model.result().dataset(tag).set("solnum", String.valueOf(idx));
+                    break;
+            }
+            return "";
+        } catch (Throwable t) {
+            return String.valueOf(t.getMessage());
+        }
+    }
+
+    // Intenta fijar la outer solution en el propio dataset; false si el dataset no lo permite
+    boolean applyOuter(String tag, Ds ds) {
+        SweepInfo si = ds.sweep;
+        int idx = ds.sweepIdx;
+        for (int s = 0; s < 6; s++) {
+            if (s == 3 && si.names.length != 1) continue;
+            if (!tryStrategy(tag, s, idx, si.viaParent).isEmpty()) continue;
+            if (si.hasUnits) return true;
+            String v = verify(tag, si, idx - 1, 0);
+            if (v == null || v.isEmpty()) return true;
+        }
+        return false;
+    }
+
+    // "" = coincide; texto = discrepancia; null = no concluyente. loop > 0: looplevel manual en la evaluacion
+    String verify(String dsTag, SweepInfo si, int idx, int loop) {
+        String ev = "ev_sweep_" + dsTag;
+        try { model.result().numerical().remove(ev); } catch (Throwable t) { }
+        try {
+            model.result().numerical().create(ev, "EvalGlobal");
+            model.result().numerical(ev).set("data", dsTag);
+            if (loop > 0) {
+                try {
+                    model.result().numerical(ev).setIndex("looplevelinput", "manual", 0);
+                    model.result().numerical(ev).setIndex("looplevel", String.valueOf(loop), 0);
+                } catch (Throwable t) {
+                    model.result().numerical(ev).set("looplevelinput", new String[] {"manual"});
+                    model.result().numerical(ev).set("looplevel", new int[] {loop});
+                }
+            }
+            boolean conclusive = true;
+            for (int k = 0; k < si.names.length; k++) {
+                model.result().numerical(ev).set("expr", new String[] {si.names[k]});
+                java.util.List<Double> got = new java.util.ArrayList<Double>();
+                u.flatten(u.call(model.result().numerical(ev), "getReal"), got);
+                if (got.isEmpty()) return null;
+                double want = si.combos.get(idx)[k];
+                double tol = 1e-6 * Math.max(1, Math.abs(want));
+                boolean found = false, other = false;
+                for (int i = 0; i < got.size(); i++) {
+                    if (Math.abs(got.get(i).doubleValue() - want) <= tol) found = true; else other = true;
+                }
+                if (!found) return si.names[k] + ": esperado " + u.numTok(want) + ", COMSOL devuelve " + u.numTok(got.get(0).doubleValue());
+                if (other) conclusive = false;
+            }
+            return conclusive ? "" : null;
+        } catch (Throwable t) {
+            return null;
+        } finally {
+            try { model.result().numerical().remove(ev); } catch (Throwable t) { }
+        }
+    }
+
+    // Otro dataset de la misma solucion/estudio que si exponga el barrido (p.ej. "Parametric Solutions")
+    java.util.List<String> sweepAwareDatasets(Ds ds) {
+        java.util.List<String> out = new java.util.ArrayList<String>();
+        String[] tags = model.result().dataset().tags();
+        for (int i = 0; i < tags.length; i++) {
+            if (tags[i].equals(ds.srcTag)) continue;
+            String pl = exp.propList(model.result().dataset(tags[i]));
+            if (pl.indexOf("outersolnum") < 0 && pl.indexOf("solnum") < 0) continue;
+            String[] so = solutionOf(tags[i]);
+            if (so == null) continue;
+            if (so[0].equals(ds.sweep.solTag) || studyOf(so[0], "").equals(ds.sweep.study)) out.add(tags[i]);
+        }
+        return out;
+    }
+
+    // Selecciona el valor del barrido: en el dataset si lo permite; si no, en un dataset hermano que si lo
+    // permita; y como ultimo recurso via "looplevel" en cada plot group / export (exp.loop)
+    void prepare(Ds ds) throws Exception {
+        exp.loop = 0;
+        String tmp = "dsweep_" + ds.srcTag + "_" + ds.sweepIdx;
+        exp.rmDataset(tmp);
+        model.result().dataset().duplicate(tmp, ds.srcTag);
+        if (applyOuter(tmp, ds)) { ds.tag = tmp; return; }
+        exp.rmDataset(tmp);
+
+        java.util.List<String> sib = sweepAwareDatasets(ds);
+        for (int i = 0; i < sib.size(); i++) {
+            model.result().dataset().duplicate(tmp, sib.get(i));
+            if (applyOuter(tmp, ds)) {
+                lg.log("INFO", ds.srcTag, "Valor del barrido seleccionado a traves del dataset " + sib.get(i) + ".");
+                ds.tag = tmp;
+                return;
+            }
+            exp.rmDataset(tmp);
+        }
+
+        exp.loop = ds.sweepIdx;
+        lg.log("INFO", ds.srcTag, "El dataset no expone la outer solution; se selecciona el valor con looplevel en los plots/exports.");
+        if (!ds.sweep.hasUnits) {
+            String v = verify(ds.srcTag, ds.sweep, ds.sweepIdx - 1, ds.sweepIdx);
+            if (v == null) lg.log("WARN", ds.srcTag, "No se pudo comprobar el valor del barrido (" + ds.sweep.labels.get(ds.sweepIdx - 1) + "); revisa los resultados.");
+            else if (!v.isEmpty()) throw new Exception("looplevel " + ds.sweepIdx + " no corresponde al valor esperado (" + v + ").");
+        }
+    }
+
+    void release(Ds ds) {
+        exp.loop = 0;
+        if (ds.sweepIdx > 0 && !ds.tag.equals(ds.srcTag)) {
+            exp.rmDataset(ds.tag);
+            ds.tag = ds.srcTag;
+        }
+    }
+}
+
+final Sweeper sw = new Sweeper();
 
 // ----------------------------------------------------------------------------
 // Postproceso Python (histogramas): equivalente a run_*_python_postprocess
@@ -1152,6 +1774,13 @@ class Py {
                     while ((n = is.read(buf)) > 0) bos.write(buf, 0, n);
                     status = pr.waitFor();
                     output = bos.toString();
+                } catch (SecurityException e) {
+                    // COMSOL bloquea la ejecucion de procesos: no tiene sentido probar mas interpretes
+                    String bat = writeBatch(scriptFile, txtPath, outPng, inFlag, outFlag, extra);
+                    throw new Exception("COMSOL no permite ejecutar procesos externos (Preferences > Security > "
+                        + "Methods and Libraries: permitir llamadas al sistema / acceso a ficheros). "
+                        + (bat.isEmpty() ? "" : "Comando guardado en: " + bat + " (ejecutalo manualmente).")
+                        + " Detalle: " + e.getMessage());
                 } catch (Exception e) {
                     errors.append(candidates[i][0]).append(": ").append(e.getMessage()).append(" | ");
                     continue;
@@ -1172,13 +1801,38 @@ class Py {
         }
     }
 
+    String q(String s) { return "\"" + s.replace("\"", "\"\"") + "\""; }
+
+    // Anade el comando a run_python_postprocess.bat (junto al .txt) para lanzarlo fuera de COMSOL
+    String writeBatch(java.io.File scriptFile, String txtPath, String outPng, String inFlag, String outFlag,
+                      java.util.List<String> extra) {
+        try {
+            java.io.File dir = new java.io.File(txtPath).getParentFile();
+            java.io.File bat = new java.io.File(dir, "run_python_postprocess.bat");
+            boolean isNew = !bat.exists();
+            StringBuilder sb = new StringBuilder();
+            if (isNew) sb.append("@echo off\r\n");
+            sb.append("python ").append(q(scriptFile.getPath()))
+              .append(" ").append(inFlag).append(" ").append(q(txtPath))
+              .append(" ").append(outFlag).append(" ").append(q(outPng));
+            for (int i = 0; i < extra.size(); i++) sb.append(" ").append(q(extra.get(i)));
+            sb.append(" --no-show\r\n");
+            java.io.FileWriter fw = new java.io.FileWriter(bat, true);
+            try { fw.write(sb.toString()); } finally { fw.close(); }
+            return bat.getPath();
+        } catch (Exception ex) {
+            return "";
+        }
+    }
+
     String base(String txtPath) { return txtPath.replaceAll("\\.[^.\\\\/]*$", ""); }
 
-    void bfov(String txtPath, String modelName, String fovInfo, String analysis) throws Exception {
+    void bfov(String txtPath, String modelName, String fovInfo, String analysis, String field) throws Exception {
         java.util.List<String> a = new java.util.ArrayList<String>();
         a.add("--magnet-info"); a.add(modelName);
         a.add("--fov-info"); a.add(fovInfo);
         a.add("--analysis"); a.add(analysis);
+        a.add("--field-label"); a.add(field);
         a.add("--bfov-only");
         run("Comsol_extracted_histograms_BFOV_Magnets.py", txtPath, base(txtPath) + ".png", "--file-path", "--output-png", a);
     }
@@ -1227,13 +1881,13 @@ class Runner {
         }
 
         if (o.bfov3d || o.bfovHist) {
-            exp.exportDataset(ds.tag, histTxt, png3d, selTag, selLabel, o.histBins, o.orthoScale);
+            exp.exportDataset(ds.tag, histTxt, png3d, selTag, selLabel, o.histBins, o.changeOrtho ? o.orthoScale : -1, o.field);
             lg.log("INFO", ds.tag, prefix + ": 3D plot + histograma exportados.");
         }
 
         if (o.bfovHist && o.runPython) {
             try {
-                py.bfov(histTxt, o.modelName, fovInfo, analysis);
+                py.bfov(histTxt, o.modelName, fovInfo, analysis, o.field);
                 lg.log("INFO", ds.tag, "Postproceso BFOV Python completado.");
             } catch (Exception e) {
                 lg.log("WARN", ds.tag, "Postproceso BFOV no ejecutado: " + e.getMessage());
@@ -1315,7 +1969,11 @@ class Runner {
             Ds ds = datasets.get(i);
             try {
                 lg.log("INFO", ds.tag, "Preparando dataset " + (i + 1) + " de " + datasets.size() + ": " + ds.shortLabel);
-                String folder = u.createOutputFolder(o.outDir, ds.shortLabel, ds.tag);
+                if (ds.sweepIdx > 0) {
+                    sw.prepare(ds);
+                    lg.log("INFO", ds.srcTag, "Parametric Sweep: " + ds.sweep.labels.get(ds.sweepIdx - 1) + " (outer solution " + ds.sweepIdx + ").");
+                }
+                String folder = u.createOutputFolder(o.outDir, ds.folderName.isEmpty() ? u.safeName(ds.shortLabel) : ds.folderName, ds.tag);
                 lg.log("INFO", ds.tag, "Carpeta de salida lista: " + folder);
                 if (o.domainMode) {
                     for (int k = 0; k < o.domains.size(); k++) bfov(ds, folder, o, o.domains.get(k));
@@ -1328,6 +1986,8 @@ class Runner {
             } catch (Throwable e) {
                 nErr++;
                 lg.log("ERROR", ds.tag, String.valueOf(e.getMessage()));
+            } finally {
+                sw.release(ds);
             }
             lg.log("INFO", "", "Progreso: " + (i + 1) + " / " + datasets.size() + " datasets procesados.");
         }
@@ -1347,7 +2007,9 @@ try {
         new String[] {"Run Extraction", "Extract Geometry Plots", "Cancel"});
     if (action == 0 || action == 1) {
         Opts o = new Opts();
-        o.outDir = prefs.s("LastOutputDir", "");
+        // Por defecto, la carpeta del .mph actual (modificable); si no esta guardado, la ultima usada
+        String modelDir = u.modelDir();
+        o.outDir = modelDir.isEmpty() ? prefs.s("LastOutputDir", "") : modelDir;
         String nm = "";
         try { nm = model.label(); } catch (Throwable t) { }
         o.modelName = u.safeName(nm == null ? "" : nm.replaceAll("(?i)\\.mph$", ""));
@@ -1384,6 +2046,11 @@ try {
             boolean go = !all.isEmpty();
             if (all.isEmpty()) ui.error("Datasets", "El modelo no contiene datasets.");
 
+            // Modelo sin guardar: se pide la carpeta de salida al inicio
+            if (go && modelDir.isEmpty()) {
+                String d = ui.chooseDir(o.outDir);
+                if (d != null) o.outDir = d;
+            }
             go = go && ui.askMain(o, all, selected);
             if (go) {
                 prefs.put("LastOutputDir", o.outDir);
@@ -1397,6 +2064,10 @@ try {
             if (go && !o.bfov3d && !o.bfovHist && !o.bfovCoord && !o.magnets3d && !o.magnetsHist) {
                 ui.error("Salida requerida", "Debe seleccionar al menos una opcion de salida.");
                 go = false;
+            }
+            if (go) {
+                java.util.List<Ds> work = sw.resolve(selected);
+                if (work == null) go = false; else selected = work;
             }
             if (go && o.bfov3d && o.changeOrtho) go = ui.askOrthoScale(o);
             if (go && o.bfovHist) go = ui.askHistBins(o);
