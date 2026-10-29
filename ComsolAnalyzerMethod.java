@@ -1029,6 +1029,25 @@ class Exporter {
         catch (Throwable t) { model.component("comp1").view().create("view2", "geom1"); }
     }
 
+    // Elimina todos los nodos Hide Domains/Entities/Objects de la vista para que ningun dominio quede oculto por iteraciones previas
+    void resetViewHides(String viewTag) {
+        try {
+            String[] tags = model.component("comp1").view(viewTag).hideEntities().tags();
+            for (int i = 0; tags != null && i < tags.length; i++) {
+                try { model.component("comp1").view(viewTag).hideEntities().remove(tags[i]); } catch (Throwable t) { }
+            }
+        } catch (Throwable t) { }
+        try { model.component("comp1").view(viewTag).hideEntities().clear(); } catch (Throwable t) { }
+        try { model.component("comp1").view(viewTag).hideObjects().clear(); } catch (Throwable t) { }
+    }
+
+    // Vista limpia (sin ocultos) en view1 y view2 (si existe); el plot group vuelve a la vista automatica
+    void resetAllViewHides(String pgTag) {
+        resetViewHides("view1");
+        resetViewHides("view2");
+        if (pgTag != null) { try { model.result(pgTag).set("view", "auto"); } catch (Throwable t) { } }
+    }
+
     // Zoom to extents de la vista (la API puede no exponerlo; el export con "zoomextents" actua como respaldo)
     void fitView(String viewTag) {
         try { u.call(model.component("comp1").view(viewTag).camera(), "zoomExtents"); } catch (Throwable t) { }
@@ -1056,6 +1075,7 @@ class Exporter {
         java.io.File tmp = u.tempFile("png", imgTag);
         try {
             rmExport(imgTag);
+            resetAllViewHides(pgTag);
             model.result().export().create(imgTag, pgTag, "Image");
             configureImage(imgTag, "off", fit3d);
             if (fit3d) {
@@ -1106,6 +1126,8 @@ class Exporter {
         String[] paths = orthoPaths(mainPng);
         for (int i = 0; i < paths.length; i++) u.ensureParent(paths[i]);
         ensureView2();
+        resetViewHides("view1");
+        resetViewHides("view2");
         try { model.result(pg3d).set("view", "view2"); } catch (Throwable t) { }
         rmExport(imgTag);
         model.result().export().create(imgTag, pg3d, "Image");
@@ -1153,16 +1175,18 @@ class Exporter {
             model.result().dataset(newDs).selection().geom("geom1", 3);
             model.result().dataset(newDs).selection().named(sel);
 
-            // 3D: dataset temporal dedicado
-            try { model.component("comp1").view("view1").hideObjects().clear(); } catch (Throwable t) { }
+            // 3D: dataset temporal dedicado; vistas limpias antes de asignar la seleccion del FOV actual
+            resetAllViewHides(null);
             model.result().dataset().duplicate(ds3d, dsTag);
             model.result().dataset(ds3d).selection().geom("geom1", 3);
             model.result().dataset(ds3d).selection().named(sel);
 
             model.result().create(pg3d, "PlotGroup3D");
             if (selLabel != null && !selLabel.isEmpty()) model.result(pg3d).label(selLabel);
+            resetAllViewHides(pg3d);
             try { model.result(pg3d).run(); } catch (Throwable t) { }
             model.result(pg3d).set("data", ds3d);
+            resetAllViewHides(pg3d);
             loopPlot(pg3d);
             model.result(pg3d).create("vol1", "Volume");
             model.result(pg3d).feature("vol1").set("evaluationsettings", "parent");
@@ -1233,8 +1257,10 @@ class Exporter {
             model.result().dataset(newDs).selection().named(mag);
 
             model.result().create(pg3d, "PlotGroup3D");
+            resetAllViewHides(pg3d);
             try { model.result(pg3d).run(); } catch (Throwable t) { }
             model.result(pg3d).set("data", newDs);
+            resetAllViewHides(pg3d);
             loopPlot(pg3d);
             model.result(pg3d).set("titletype", "manual");
             model.result(pg3d).set("title", "M (T)");
@@ -1357,14 +1383,18 @@ class Exporter {
 
     // Geometry_3D / Geometry_XY / Geometry_YZ ocultando las selections elegidas
     void exportGeometryPlots(String simulationRoot, java.util.List<Sel> hide) throws Exception {
+        try { exportGeometryPlotsImpl(simulationRoot, hide); }
+        finally { resetViewHides("view2"); }
+    }
+
+    void exportGeometryPlotsImpl(String simulationRoot, java.util.List<Sel> hide) throws Exception {
         java.io.File root = new java.io.File(simulationRoot);
         if (!root.isDirectory() && !root.mkdirs()) throw new Exception("No se pudo crear " + simulationRoot);
         rmExport("img6");
         try { model.component("comp1").view().remove("view2"); } catch (Throwable t) { }
 
         model.component("comp1").view().create("view2", "geom1");
-        model.component("comp1").view("view2").hideObjects().clear();
-        model.component("comp1").view("view2").hideEntities().clear();
+        resetViewHides("view2");
         for (int i = 0; i < hide.size(); i++) {
             String hideTag = "hide" + (i + 1);
             model.component("comp1").view("view2").hideEntities().create(hideTag);

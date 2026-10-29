@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
 )
 
-from app.gui.dialogs.notion_upload_dialog import NotionUploadDialog
+from app.gui.dialogs.notion_upload_dialog import MODE_EXISTING_LOG, NotionUploadDialog
 from app.gui.dialogs.notion_token_dialog import NotionTokenDialog
 from app.gui.tabs.generate_tab import GenerateTab
 from app.gui.tabs.magnet_data_tab import MagnetDataTab
@@ -172,21 +172,27 @@ class MainWindow(QMainWindow):
 
             default_title = self._default_notion_title()
             available_tags = sorted({*workspace.tags, *self._settings.notion_known_tags}, key=str.lower)
+            token = self._settings.notion_token
             dlg = NotionUploadDialog(
                 workspace.projects,
                 available_tags,
                 default_title,
                 default_project_id=self._settings.notion_last_project_page_id,
                 selected_tags=self._settings.notion_last_selected_tags,
+                log_loader=lambda project_id: self._notion_service.list_project_logs(token, workspace, project_id),
                 parent=self,
             )
             if dlg.exec() != NotionUploadDialog.Accepted:
                 return
 
+            project_id = dlg.selected_project_id()
+            if dlg.mode() == MODE_EXISTING_LOG:
+                self._add_to_existing_notion_log(dlg.existing_log_page_id(), project_id)
+                return
+
             markdown_path = self._current_markdown_export_path()
             payload = self._build_current_payload(markdown_path, "md")
             self._report_service.generate(payload)
-            project_id = dlg.selected_project_id()
             page_id, notion_url = self._notion_service.create_simulation_log_page(
                 token=self._settings.notion_token,
                 workspace=workspace,
@@ -208,6 +214,41 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Notion Upload Error", str(err))
         except Exception as err:
             QMessageBox.critical(self, "Notion Upload Error", str(err))
+
+    def _add_to_existing_notion_log(self, log_reference: str, project_id: str) -> None:
+        token = self._settings.notion_token
+        snapshot = self._notion_service.read_log(token, log_reference)
+
+        markdown_path = self._current_markdown_export_path()
+        markdown_path = markdown_path.with_name(f"{markdown_path.stem}_notion_append.md")
+        payload = self._build_current_payload(markdown_path, "md")
+
+        new_studies = [study for study in payload.studies if not snapshot.has_study(study.folder_name)]
+        skipped = [study.folder_name for study in payload.studies if snapshot.has_study(study.folder_name)]
+        if not new_studies:
+            QMessageBox.information(
+                self,
+                "Nothing to add",
+                f'All the selected studies are already present in the log "{snapshot.title}".',
+            )
+            return
+
+        # Phase 2: only the new studies are generated; the initial magnet data section is left untouched.
+        payload.studies = new_studies
+        payload.magnet_metrics = None
+        self._report_service.generate(payload)
+        plan = self._notion_service.append_to_existing_log(token, snapshot, markdown_path)
+
+        self._settings.notion_last_project_page_id = project_id
+        self._settings_service.save_settings(self._settings)
+        message = (
+            f'Added {len(new_studies)} study(ies) to "{snapshot.title}" '
+            f"({plan.merged_tables} table(s) extended).\n{snapshot.url}"
+        )
+        if skipped:
+            message += f"\nAlready in the log (skipped): {', '.join(skipped)}"
+        self.tab_generate.set_status(f"Added to Notion log: {snapshot.url}")
+        QMessageBox.information(self, "Log updated", message)
 
     def on_summary_rows_changed(self, selected_rows: list[str]) -> None:
         self._settings.last_summary_rows = list(selected_rows)
